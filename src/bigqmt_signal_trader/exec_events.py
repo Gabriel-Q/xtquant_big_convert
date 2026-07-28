@@ -31,14 +31,24 @@ ENTRUST_SELL = 49        # 卖出 / 空
 ENTRUST_PLEDGE_IN = 81   # 质押入库
 ENTRUST_PLEDGE_OUT = 66  # 质押出库
 
-# Map direction -> "BUY"/"SELL". m_nDirection is EEntrustBS (48/49); we also accept
-# the MiniQMT order_type (STOCK_BUY=23 / STOCK_SELL=24) and plain text, because
-# normalize_* falls back to `order_type` when m_nDirection is absent. Unknown -> ""
-# (the raw `direction` value is always preserved so callers can refine).
-# WARNING: do NOT map from m_nOffsetFlag — offset ALSO uses 48/49 but there means
-# 开仓/平仓 (open/close), not buy/sell. Direction and offset must not be confused.
-_BUY_DIRECTIONS = {ENTRUST_BUY, str(ENTRUST_BUY), 23, "23", "BUY", "buy", "B"}
-_SELL_DIRECTIONS = {ENTRUST_SELL, str(ENTRUST_SELL), 24, "24", "SELL", "sell", "S"}
+# enum_EOffset_Flag_Type (开平方向, the m_nOffsetFlag field).
+# 48=开仓(=买入 for stocks), 49=平仓(=卖出 for stocks), 51=平今, 52=平昨.
+# For spot stocks (无做空), offset flag 48/49 coincides exactly with buy/sell,
+# and it is the RELIABLE field in live order_callback (m_nDirection can be 0/None
+# at certain callback moments). query_orders already uses m_nOffsetFlag for this
+# reason. For futures, offset and direction differ — but we only ship stocks here.
+OFFSET_OPEN = 48
+OFFSET_CLOSE = 49
+OFFSET_CLOSE_TODAY = 51
+OFFSET_CLOSE_YESTERDAY = 52
+
+# Map direction -> "BUY"/"SELL". Priority:
+#   1. m_nOffsetFlag (reliable in live callbacks, matches query_orders)
+#   2. m_nDirection (EEntrustBS 48/49)
+#   3. order_type (MiniQMT STOCK_BUY=23 / STOCK_SELL=24) and plain text
+# Unknown -> "" (the raw value is always preserved so callers can refine).
+_BUY_DIRECTIONS = {ENTRUST_BUY, str(ENTRUST_BUY), OFFSET_OPEN, str(OFFSET_OPEN), 23, "23", "BUY", "buy", "B"}
+_SELL_DIRECTIONS = {ENTRUST_SELL, str(ENTRUST_SELL), OFFSET_CLOSE, str(OFFSET_CLOSE), OFFSET_CLOSE_TODAY, str(OFFSET_CLOSE_TODAY), OFFSET_CLOSE_YESTERDAY, str(OFFSET_CLOSE_YESTERDAY), 24, "24", "SELL", "sell", "S"}
 
 
 def order_channel(account_id):
@@ -69,9 +79,61 @@ def _action_from_direction(direction):
     return ""
 
 
+def _extract_direction(obj):
+    """Extract buy/sell direction, matching query_orders' reliable logic.
+
+    For spot stocks, m_nDirection (EEntrustBS 48/49) and m_nOffsetFlag
+    (EOffset_Flag_Type 48/49) coincide: buy=open=48, sell=close=49.
+
+    In live order_callback/deal_callback, m_nDirection can be 0/None at
+    certain callback moments (e.g. early "未报" state), while m_nOffsetFlag
+    is reliably populated. query_orders uses m_nOffsetFlag and works in
+    production. So we prefer offset_flag when direction is absent/invalid.
+
+    For futures (not shipped here), direction≠offset (e.g. sell+open=short).
+    If BOTH fields are present and direction is a valid buy/sell value, we
+    trust m_nDirection (the true buy/sell signal), preserving futures correctness.
+
+    Fallback chain: m_nDirection(if valid buy/sell) > m_nOffsetFlag > order_type.
+    The raw value is always returned (even pledge=81) so callers can inspect it;
+    _action_from_direction maps only known buy/sell values, leaving others "".
+    """
+    direction = _attr(obj, ["m_nDirection", "direction"])
+    offset = _attr(obj, ["m_nOffsetFlag", "offset_flag"])
+
+    # If direction is present and is a valid buy/sell value, use it (covers
+    # both stock 48/49 and futures where direction≠offset).
+    if direction is not None:
+        try:
+            d = int(direction)
+            if d in _BUY_DIRECTIONS or d in _SELL_DIRECTIONS:
+                return direction
+            # 0 / other non-buy-sell numeric -> treat as absent (live bug: m_nDirection
+            # is 0 at certain callback moments), fall through to offset_flag.
+            # Non-zero non-buy-sell (e.g. pledge 81) is preserved below.
+            if d != 0:
+                return direction
+        except (TypeError, ValueError):
+            if direction in _BUY_DIRECTIONS or direction in _SELL_DIRECTIONS:
+                return direction
+            # non-numeric, non-buy-sell (text) — preserve it
+            return direction
+    # direction absent/None -> fall back to offset_flag (reliable in stocks)
+    if offset is not None:
+        try:
+            o = int(offset)
+            if o in _BUY_DIRECTIONS or o in _SELL_DIRECTIONS:
+                return offset
+        except (TypeError, ValueError):
+            if offset in _BUY_DIRECTIONS or offset in _SELL_DIRECTIONS:
+                return offset
+    # last resort: MiniQMT-style order_type field
+    return _attr(obj, ["order_type"])
+
+
 def normalize_order_event(order, account_id=""):
     """Build a JSON-able order event dict from a Big QMT orderInfo object."""
-    direction = _attr(order, ["m_nDirection", "direction", "order_type"])
+    direction = _extract_direction(order)
     return {
         "event_type": EVENT_ORDER,
         "account_id": str(_attr(order, ["m_strAccountID", "account_id"], account_id) or account_id or ""),
@@ -92,7 +154,7 @@ def normalize_order_event(order, account_id=""):
 
 def normalize_trade_event(trade, account_id=""):
     """Build a JSON-able trade (成交) event dict from a Big QMT dealInfo object."""
-    direction = _attr(trade, ["m_nDirection", "direction", "order_type"])
+    direction = _extract_direction(trade)
     return {
         "event_type": EVENT_TRADE,
         "account_id": str(_attr(trade, ["m_strAccountID", "account_id"], account_id) or account_id or ""),

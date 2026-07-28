@@ -120,6 +120,38 @@ class ExecEventsServerTest(unittest.TestCase):
         self.assertEqual(ev["action"], "SELL")   # derived from m_nDirection
         self.assertEqual(ev["offset_flag"], 48)  # raw offset preserved, not conflated
 
+    def test_direction_falls_back_to_offset_when_direction_missing(self):
+        """Live bug: m_nDirection is 0/None at certain callback moments,
+        causing sell orders to be misread as buy. Fall back to m_nOffsetFlag
+        (matches query_orders, which works correctly in production)."""
+        class SellOrder:
+            m_strInstrumentID = "601398.SH"
+            m_nDirection = 0       # absent/zero in live callback (the bug)
+            m_nOffsetFlag = 49     # 平仓 = sell for stocks
+            m_nVolumeTotal = 100
+            m_nVolumeTraded = 0
+            m_dLimitPrice = 6.34
+            m_strOrderSysID = "S123"
+
+        ev = normalize_order_event(SellOrder(), "acct")
+        self.assertEqual(ev["action"], "SELL")  # from offset_flag, not 0/None
+        self.assertEqual(ev["direction"], 49)
+
+    def test_direction_falls_back_to_offset_when_direction_none(self):
+        """Same bug with direction=None entirely."""
+        class BuyOrder:
+            m_strInstrumentID = "601398.SH"
+            m_nDirection = None
+            m_nOffsetFlag = 48     # 开仓 = buy for stocks
+            m_nVolumeTotal = 100
+            m_nVolumeTraded = 0
+            m_dLimitPrice = 6.34
+            m_strOrderSysID = "B456"
+
+        ev = normalize_order_event(BuyOrder(), "acct")
+        self.assertEqual(ev["action"], "BUY")   # from offset_flag
+        self.assertEqual(ev["direction"], 48)
+
     def test_pledge_direction_has_no_buy_sell_action(self):
         class Deal:
             m_strInstrumentID = "600000.SH"
