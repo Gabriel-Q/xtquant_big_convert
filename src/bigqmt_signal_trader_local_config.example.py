@@ -55,4 +55,10 @@ BIGQMT_REDIS_CONFIG = {
     # Push order_callback/deal_callback details to Redis so clients get real-time
     # on_stock_order / on_stock_trade callbacks (MiniQMT style) instead of polling.
     "exec_events_enabled": True,
+    # Dump the raw order_callback/deal_callback object fields to the QMT output
+    # panel, and attach them to the published event as "raw_fields". Prints on
+    # every callback, so keep it off outside a diagnosis window. Turn it on to
+    # observe what m_nDirection / m_nOffsetFlag actually carry in live callbacks
+    # — the buy/sell mapping in exec_events.py currently assumes 48/49 there.
+    "exec_events_debug_raw_fields": False,
 }

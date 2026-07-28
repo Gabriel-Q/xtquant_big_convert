@@ -649,6 +649,18 @@ def _publish_exec_event(kind, obj):
     """Push a normalized order/trade event to Redis for real-time client callbacks."""
     config = _build_config()
     event_config = dict(config.get("exec_events") or {})
+    # Raw-field diagnostics run BEFORE every other check (and before the
+    # enabled/account_id early returns), because the point is to observe the
+    # object exactly as QMT handed it over — even when publishing is off.
+    raw_fields = None
+    if _config_bool(event_config.get("debug_raw_fields"), False):
+        try:
+            from bigqmt_signal_trader import exec_events
+
+            print(exec_events.format_raw_snapshot(kind, obj))
+            raw_fields = exec_events.raw_field_snapshot(obj)
+        except Exception as exc:
+            print("[bigqmt_exec_raw] snapshot %s failed: %s" % (kind, exc))
     if not _config_bool(event_config.get("enabled"), True):
         return
     account_id = str(event_config.get("account_id") or config.get("account_id") or _account_id or "")
@@ -666,13 +678,15 @@ def _publish_exec_event(kind, obj):
         from bigqmt_signal_trader import exec_events
 
         if kind == "trade":
-            exec_events.publish_trade_event(
-                redis_client, account_id, exec_events.normalize_trade_event(obj, account_id)
-            )
+            event = exec_events.normalize_trade_event(obj, account_id)
+            if raw_fields:
+                event["raw_fields"] = raw_fields
+            exec_events.publish_trade_event(redis_client, account_id, event)
         else:
-            exec_events.publish_order_event(
-                redis_client, account_id, exec_events.normalize_order_event(obj, account_id)
-            )
+            event = exec_events.normalize_order_event(obj, account_id)
+            if raw_fields:
+                event["raw_fields"] = raw_fields
+            exec_events.publish_order_event(redis_client, account_id, event)
     except Exception as exc:
         print("[bigqmt_exec_events] publish %s failed: %s" % (kind, exc))
 
