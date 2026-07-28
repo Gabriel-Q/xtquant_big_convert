@@ -131,6 +131,85 @@ def _extract_direction(obj):
     return _attr(obj, ["order_type"])
 
 
+# Fields we care about when diagnosing a direction misread. Anything starting
+# with "m_" is captured automatically; these are the MiniQMT-style names that
+# do not match that prefix.
+_RAW_SNAPSHOT_EXTRA_FIELDS = (
+    "stock_code",
+    "order_type",
+    "direction",
+    "offset_flag",
+    "order_status",
+    "order_volume",
+    "traded_volume",
+    "price",
+    "order_id",
+    "order_sysid",
+    "order_sys_id",
+    "trade_id",
+    "traded_id",
+    "strategy_name",
+    "order_remark",
+)
+
+
+def raw_field_snapshot(obj, max_repr=120):
+    """Capture every readable field of a live QMT callback object.
+
+    Direction extraction rests on an assumption about what ``m_nDirection`` and
+    ``m_nOffsetFlag`` actually carry in live order_callback/deal_callback — an
+    assumption nothing in this repo has ever observed. This dumps the raw object
+    so one live order settles it.
+
+    Returns ``{name: "<type> <value>"}``. Never raises: a callback that dies
+    while being diagnosed would be worse than no diagnosis.
+    """
+    snapshot = {}
+    try:
+        if isinstance(obj, dict):
+            names = list(obj.keys())
+        else:
+            names = [name for name in dir(obj) if name.startswith("m_")]
+            names.extend(_RAW_SNAPSHOT_EXTRA_FIELDS)
+    except Exception:
+        return {"__error__": "dir() failed"}
+    seen = set()
+    for name in names:
+        key = str(name)
+        if key in seen or key.startswith("__"):
+            continue
+        seen.add(key)
+        try:
+            if isinstance(obj, dict):
+                if key not in obj:
+                    continue
+                value = obj[key]
+            else:
+                if not hasattr(obj, key):
+                    continue
+                value = getattr(obj, key)
+            if callable(value):
+                continue
+            text = repr(value)
+            if len(text) > max_repr:
+                text = text[:max_repr] + "..."
+            snapshot[key] = "%s %s" % (type(value).__name__, text)
+        except Exception as exc:  # noqa: BLE001 - diagnostics must not break callbacks
+            snapshot[key] = "<unreadable: %s>" % exc.__class__.__name__
+    return snapshot
+
+
+def format_raw_snapshot(kind, obj):
+    """One-line, GBK-safe rendering of :func:`raw_field_snapshot` for the QMT panel."""
+    snapshot = raw_field_snapshot(obj)
+    parts = ["%s=%s" % (name, snapshot[name]) for name in sorted(snapshot)]
+    return "[bigqmt_exec_raw] %s type=%s %s" % (
+        kind,
+        type(obj).__name__,
+        " | ".join(parts) or "<no fields>",
+    )
+
+
 def normalize_order_event(order, account_id=""):
     """Build a JSON-able order event dict from a Big QMT orderInfo object."""
     direction = _extract_direction(order)

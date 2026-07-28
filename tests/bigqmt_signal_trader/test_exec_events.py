@@ -8,11 +8,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
 from bigqmt_signal_trader.exec_events import (
+    format_raw_snapshot,
     normalize_order_event,
     normalize_trade_event,
     order_channel,
     publish_order_event,
     publish_trade_event,
+    raw_field_snapshot,
     trade_channel,
 )
 from bigqmt_signal_trader.xtquant_compat import BigQmtXtTrader, XtQuantTraderCallback
@@ -163,6 +165,68 @@ class ExecEventsServerTest(unittest.TestCase):
 
         self.assertEqual(ev["action"], "")   # pledge is neither buy nor sell
         self.assertEqual(ev["direction"], 81)  # raw direction preserved
+
+
+class RawFieldSnapshotTest(unittest.TestCase):
+    """The snapshot exists to settle what live callbacks actually carry, so it
+    must capture m_* and MiniQMT fields alike and never raise."""
+
+    def test_captures_thinktrader_and_miniqmt_fields(self):
+        snap = raw_field_snapshot(FakeOrder())
+
+        self.assertIn("m_nDirection", snap)
+        self.assertIn("49", snap["m_nDirection"])
+        self.assertIn("int", snap["m_nDirection"])
+        self.assertIn("m_strInstrumentID", snap)
+
+    def test_captures_miniqmt_style_object(self):
+        class XtOrderLike:
+            stock_code = "601398.SH"
+            order_type = 24
+            order_volume = 100
+
+        snap = raw_field_snapshot(XtOrderLike())
+
+        self.assertIn("24", snap["order_type"])
+        self.assertIn("601398.SH", snap["stock_code"])
+
+    def test_captures_dict_payload(self):
+        snap = raw_field_snapshot({"m_nOffsetFlag": 48, "order_type": 24})
+
+        self.assertIn("48", snap["m_nOffsetFlag"])
+        self.assertIn("24", snap["order_type"])
+
+    def test_skips_callables_and_dunders(self):
+        class WithMethod:
+            m_nDirection = 49
+
+            def m_method(self):
+                return 1
+
+        snap = raw_field_snapshot(WithMethod())
+
+        self.assertIn("m_nDirection", snap)
+        self.assertNotIn("m_method", snap)
+
+    def test_unreadable_attribute_does_not_raise(self):
+        class Exploding:
+            m_nDirection = 49
+
+            @property
+            def m_nOffsetFlag(self):
+                raise RuntimeError("boom")
+
+        snap = raw_field_snapshot(Exploding())
+
+        self.assertIn("m_nDirection", snap)
+        self.assertIn("unreadable", snap["m_nOffsetFlag"])
+
+    def test_format_is_a_single_ascii_safe_line(self):
+        line = format_raw_snapshot("order", FakeOrder())
+
+        self.assertNotIn("\n", line)
+        self.assertTrue(line.startswith("[bigqmt_exec_raw] order"))
+        self.assertIn("m_nDirection", line)
 
 
 class ExecEventsClientDispatchTest(unittest.TestCase):

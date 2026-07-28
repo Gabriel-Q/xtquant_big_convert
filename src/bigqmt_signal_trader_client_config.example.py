@@ -45,3 +45,24 @@ BIGQMT_LOCAL_CACHE_CONFIG = {
     # One file per (period, dividend_type, code); switching format auto-migrates.
     "format": "auto",
 }
+
+# FormulaServer direct read fast-path (port 58600).
+#   Big QMT's built-in C++ quote/reference service. Routing reads straight to it
+#   bypasses the RPC bridge AND the QMT python thread's GIL: ~0.07ms vs ~13ms
+#   over redis. Enabled by default; you normally do not need this block.
+#
+#   Covers reference/history reads only. Account, position, order, trade and
+#   五档 (get_full_tick) calls are NOT served by FormulaServer and always go over
+#   RPC. Every miss — unmapped method, untranslatable params, server down —
+#   falls back to RPC automatically, so an unreachable 58600 changes nothing.
+BIGQMT_FORMULA_SERVER_CONFIG = {
+    "enabled": True,        # or set BIGQMT_FORMULA_ENABLED=0 in the environment
+    # "host": "127.0.0.1",  # FormulaServer binds 0.0.0.0, so cross-machine works
+    #                       # if the firewall allows it
+    # "port": 58600,        # unset -> read from qmt_root's formulaserver.ini,
+    #                       # then fall back to 58600
+    # "qmt_root": r"D:\国金证券QMT交易端",
+    # "timeout_seconds": 3.0,
+    # "methods": [...],     # restrict routing to a subset (default: all mapped)
+    # "failure_cooldown_seconds": 30.0,  # pause routing this long after a failure
+}
