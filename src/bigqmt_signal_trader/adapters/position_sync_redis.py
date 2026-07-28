@@ -33,6 +33,10 @@ class RedisPositionSyncSink:
             "asset": {
                 "cash": snapshot.asset.cash,
                 "total_asset": snapshot.asset.total_asset,
+                # Carried so the client's cached-asset fallback exposes the same
+                # fields as a live query_stock_asset.
+                "frozen_cash": getattr(snapshot.asset, "frozen_cash", None),
+                "market_value": getattr(snapshot.asset, "market_value", None),
             },
             "positions": {
                 code: {
