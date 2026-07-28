@@ -1358,13 +1358,23 @@ class BigQmtXtTrader:
             data = self._cached_asset(account_id) or data
         cash = data.get("cash")
         total_asset = data.get("total_asset")
+        frozen_cash = data.get("frozen_cash")
         market_value = data.get("market_value")
         if market_value is None and cash is not None and total_asset is not None:
+            # total_asset = cash(available) + frozen_cash + market_value. Older
+            # servers send neither frozen_cash nor market_value; deriving without
+            # frozen_cash overstates market value by the frozen amount, so
+            # subtract it whenever the server did report it.
             market_value = _safe_float(total_asset) - _safe_float(cash)
+            if frozen_cash is not None:
+                market_value -= _safe_float(frozen_cash)
         return CompatObject(
             account_id=account_id,
             cash=_safe_float(cash, 0.0) if cash is not None else None,
             available_cash=_safe_float(cash, 0.0) if cash is not None else None,
+            # MiniQMT's XtAsset always exposes frozen_cash, so default to 0.0
+            # rather than None: callers do arithmetic on it.
+            frozen_cash=_safe_float(frozen_cash, 0.0) if frozen_cash is not None else 0.0,
             total_asset=_safe_float(total_asset, 0.0) if total_asset is not None else None,
             market_value=_safe_float(market_value, 0.0) if market_value is not None else 0.0,
         )
