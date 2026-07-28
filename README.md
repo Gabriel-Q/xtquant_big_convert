@@ -56,6 +56,56 @@
 
 *zmq fast-path；约 30% 请求会撞 QMT 的 GIL 调度尖峰（~500ms）。
 
+### FormulaServer 直连快速路径（只读行情，默认开启）
+
+大 QMT 的 `58600` 端口是 **FormulaServer**——QMT 内置的 C++ 行情/参考数据服务（端口取自
+`config/formulaserver/formulaserver.ini` 的 `[server_formula] address`）。QMT 自带 Python
+的 `qmt_api` 包就是它的客户端。
+
+客户端对这些方法会**绕开整条 RPC 链路**（不经过 QMT 的 python 策略线程，也不抢 GIL），
+实测 **p50 0.07ms**，穿过完整客户端栈是 **0.145ms/次**：
+
+| 对比 | p50 |
+|------|-----|
+| redis RPC | ~13ms |
+| zmq RPC | ~0.7ms（30% 撞 500ms GIL 尖峰）|
+| **FormulaServer 直连** | **0.07ms**（无 GIL 竞争）|
+
+直连覆盖 10 个方法：`get_instrument` / `get_instrument_detail` / `get_instrumentdetail` /
+`get_last_volume` / `get_total_share` / `get_contract_multiplier` / `get_main_contract` /
+`get_weight_in_index` / `get_stock_list_in_sector` / `get_market_data_ex`。
+
+**能力边界（重要）**：FormulaServer 只有行情/参考数据。所有账户、持仓、委托、成交、下单
+方法一律返回 `ErrorID 200005 未找到该服务`，`getFullTick`/`getQuote` 也不存在。所以它是
+**只读快速路径，不是 RPC 桥的替代品**——交易、账户查询、五档盘口仍然走 RPC。
+
+以下方法**刻意不走**直连，因为参数语义与我们的调用方不一致，宁慢勿错：
+
+- `get_trading_dates` —— FormulaServer 要**股票代码**（`000001.SZ`），传市场代码（`SH`）静默返回 `[]`，而我们的调用方传的是市场。
+- `get_divid_factors` / `get_risk_free_rate` —— 参数语义不同（区间 vs 单日、index vs timetag）。
+- **复权 K 线** —— 实测 `dividendType` 传 `none` 和 `front` 返回完全相同，复权未生效。因此只有
+  `dividend_type="none"` 才走直连，其余回退 RPC，避免静默返回未复权价格。
+
+配置（客户端侧，默认就是开启，通常不用写）：
+
+```python
+BIGQMT_REDIS_CONFIG = {
+    "formula_server": {
+        "enabled": True,              # 或环境变量 BIGQMT_FORMULA_ENABLED=0 关闭
+        # "host": "127.0.0.1",        # 默认本机；FormulaServer 绑 0.0.0.0，跨机需放行防火墙
+        # "port": 58600,              # 不写则从 qmt_root 的 ini 读，再退回 58600
+        # "qmt_root": r"D:\国金证券QMT交易端",
+        # "timeout_seconds": 3.0,
+        # "methods": ["get_instrument"],       # 只路由白名单里的方法
+        # "failure_cooldown_seconds": 30.0,    # 连不上后停用多久再重试
+    },
+}
+```
+
+**失败一律自动回退 RPC**：方法未映射、参数translate 不了、服务没起、连接断——都退回原路径，
+所以连不上 58600 的客户端行为与改动前完全一致。BSON 编解码内置了无依赖实现（可选用
+pymongo 的 `bson`，两者输出实测逐字节一致），客户端不需要额外装包。
+
 ### 独立 ZMQ 回测桥接
 
 `bigqmt_backtest` 与实盘 RPC 桥接完全分离，提供两个明确隔离的后端：
@@ -439,6 +489,7 @@ python -m pytest tests/bigqmt_signal_trader/ -q
 ## 相关文档
 
 - [docs/RPC_API_REFERENCE.md](docs/RPC_API_REFERENCE.md) — **全部 RPC 方法参考**（参数、返回值、别名、大 QMT 能力边界）
+- [docs/FORMULA_SERVER_FASTPATH.md](docs/FORMULA_SERVER_FASTPATH.md) — FormulaServer(58600) 直连快速路径：协议、映射表、能力边界与回退行为
 - [docs/BIG_QMT_REDIS_RPC.md](docs/BIG_QMT_REDIS_RPC.md) — Redis RPC 协议与入口脚本详解
 - [docs/RPC_TRANSPORTS.md](docs/RPC_TRANSPORTS.md) — 可插拔传输层完整说明
 - [docs/XTQUANT_COMPAT_REPLACEMENT.md](docs/XTQUANT_COMPAT_REPLACEMENT.md) — 用兼容层替换旧 xtquant 的步骤
@@ -449,6 +500,8 @@ python -m pytest tests/bigqmt_signal_trader/ -q
 
 ## 为什么不直接连大 QMT
 
-官方 `xtquant.xttrader.XtQuantTrader` 依赖客户端侧 XtQuantServer 通道。当前国金大 QMT 环境中直接连 `connect()` 返回 `-1`；大 QMT 的 `58600` 端口是 FormulaServer 不是行情服务。
+官方 `xtquant.xttrader.XtQuantTrader` 依赖客户端侧 XtQuantServer 通道。当前国金大 QMT 环境中直接连 `connect()` 返回 `-1`，**交易能力**因此必须放在大 QMT 内部策略进程里，外部通过 RPC 驱动。
 
-因此本仓库把真实接口调用放在大 QMT 内部策略进程，外部通过 RPC 驱动。如果后续券商开通 XtQuantServer 权限且 `connect()==0`，可再加直连模式。
+**但只读行情不必走 RPC。** `58600` 是 FormulaServer，它同时就是行情/参考数据服务——QMT 自带 Python 里的 `qmt_api` 包（`bin.x64/Lib/site-packages/qmt_api`）正是它的客户端。本仓库已接入这条直连快速路径，见上文「FormulaServer 直连快速路径」。
+
+如果后续券商开通 XtQuantServer 权限且 `connect()==0`，可再加交易直连模式。

@@ -161,6 +161,8 @@ def load_client_config(module_name=None):
         for key in ("local_cache_enabled", "local_cache_dir", "local_cache_fallback_rpc", "local_cache_format"):
             if key in redis_config:
                 local_cache_config[key.replace("local_cache_", "")] = redis_config[key]
+        formula_server_config = dict(getattr(module, "BIGQMT_FORMULA_SERVER_CONFIG", {}) or {})
+        formula_server_config.update(dict(redis_config.get("formula_server") or {}))
         return {
             "module": candidate,
             "account_id": account_id,
@@ -168,6 +170,7 @@ def load_client_config(module_name=None):
             "timeout_seconds": timeout_seconds,
             "full_tick_cache_config": full_tick_cache_config,
             "local_cache_config": local_cache_config,
+            "formula_server_config": formula_server_config,
         }
     return {}
 
@@ -366,6 +369,19 @@ class BigQmtRpcClient:
         self.zmq_config = dict(merged_redis_config.get("zmq") or {})
         self.mysql_config = dict(merged_redis_config.get("mysql") or {})
         self._transport_instance = None  # lazily built by _transport()
+        # FormulaServer read fast-path. QMT's C++ quote service (port 58600)
+        # answers reference/history reads in ~0.07ms without touching the QMT
+        # python thread. Enabled by default; every miss falls back to RPC, so a
+        # client that cannot reach it just runs as before.
+        formula_config = dict(
+            client_config.get("formula_server_config")
+            or merged_redis_config.get("formula_server")
+            or {}
+        )
+        if "enabled" not in formula_config:
+            formula_config["enabled"] = _env_bool("BIGQMT_FORMULA_ENABLED", True)
+        self.formula_server_config = formula_config
+        self._formula_router_instance = None  # lazily built by _formula_router()
 
     def _redis(self):
         if self.redis_client is None:
@@ -409,11 +425,43 @@ class BigQmtRpcClient:
             )
         return self._transport_instance
 
+    def _formula_router(self):
+        """Lazily build the FormulaServer router. Never raises — a router that
+        cannot be built simply means every read goes over RPC."""
+        if self._formula_router_instance is None:
+            try:
+                from .formula_server import build_router
+
+                self._formula_router_instance = build_router(
+                    self.formula_server_config, print_prefix="[bigqmt_formula]"
+                )
+            except Exception as exc:
+                print("[bigqmt_formula] disabled (%s: %s)" % (exc.__class__.__name__, exc))
+
+                class _Disabled(object):
+                    def supports(self, method):
+                        return False
+
+                self._formula_router_instance = _Disabled()
+        return self._formula_router_instance
+
     def call(self, method, params=None, account_id=None, timeout_seconds=None):
         target_account = str(account_id or self.account_id or "")
         if not target_account:
             raise ValueError("Big QMT account_id is required")
         wait_seconds = self.timeout_seconds if timeout_seconds is None else timeout_seconds
+        # Fast path: reference/history reads answered straight by QMT's
+        # FormulaServer, bypassing the strategy process and its GIL. Anything it
+        # declines (unmapped method, untranslatable params, server down) raises
+        # Unroutable and drops through to the RPC bridge below.
+        router = self._formula_router()
+        if router.supports(method):
+            from .formula_server import Unroutable
+
+            try:
+                return _restore_jsonable(router.call(method, params or {}))
+            except Unroutable:
+                pass
         transport = self._transport()
         if transport is not None:
             # Swappable transport path (zmq/mysql/...). Build the request
