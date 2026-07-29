@@ -441,9 +441,13 @@ class BigQmtRpcHandlers:
     def _handle_query_orders(self, params):
         if self.order_gateway is None:
             raise RuntimeError("order_gateway is not configured")
+        # strategy_name filters orders by the name used in passorder. An empty
+        # string returns ALL orders for the account (verified via diagnostic:
+        # st="" -> 9 orders, st="bigqmt_signal_trader" -> 0). Default to ""
+        # so callers see every order unless they explicitly filter.
         orders = self.order_gateway.query_orders(
             self._request_account_id(params),
-            str(params.get("strategy_name") or "bigqmt_signal_trader"),
+            str(params.get("strategy_name") or ""),
         )
         if _bool_value(params.get("cancelable_only"), False):
             return [
@@ -456,9 +460,11 @@ class BigQmtRpcHandlers:
     def _handle_query_trades(self, params):
         if self.order_gateway is None:
             raise RuntimeError("order_gateway is not configured")
+        # Empty strategy_name returns ALL deals for the account (see query_orders
+        # note). Default "" so callers see every trade unless they filter.
         strategy_name = params.get("strategy_name")
         if strategy_name is None:
-            strategy_name = "bigqmt_signal_trader"
+            strategy_name = ""
         return self.order_gateway.query_trades(
             self._request_account_id(params),
             str(strategy_name),

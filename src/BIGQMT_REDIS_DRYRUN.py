@@ -30,7 +30,7 @@ _ORIGINAL_RELOAD = _importlib.reload
 
 def _known_qmt_python_dir():
     # chr()-encoded so GBK save does not mangle the CJK path.
-    # decodes to: D:\国金证券QMT交易端_lemo\python
+    # decodes to the actual QMT install dir: D:\<broker>QMT<suffix>_lemo\python
     root = "".join(chr(value) for value in (
         0x56fd, 0x91d1, 0x8bc1, 0x5238, 0x51, 0x4d, 0x54,
     ))
@@ -220,6 +220,31 @@ except Exception as account_config_error:
         _runtime.configure_runtime_account(account_id)
 
 try:
+    # diag: probe QMT-injected globals and write results to redis for external read
+    try:
+        import json as _json
+        import redis as _redis
+        _r = _redis.Redis(host="192.168.8.13", port=63790, db=5, password="Lemo@1995", socket_timeout=8)
+        _g = globals()
+        _found = {}
+        for _name in sorted(dir(_g)):
+            _low = _name.lower()
+            if any(k in _low for k in ('trade', 'order', 'detail', 'passorder', 'cancel', 'query')):
+                if callable(_g.get(_name)):
+                    _found[_name] = type(_g.get(_name)).__name__
+        _payload = {
+            "candidates": sorted(_found.keys()),
+            "has_get_trade_detail_data": "get_trade_detail_data" in _g,
+            "has_passorder": "passorder" in _g,
+            "has_cancel": "cancel" in _g,
+            "count": len(_found),
+        }
+        _r.setex("bigqmt:diag:globals", 300, _json.dumps(_payload, ensure_ascii=False))
+    except Exception as _e:
+        try:
+            print("[bigqmt_diag] failed: %s" % _e)
+        except Exception:
+            pass
     qmt_extra = {}
     for function_name in (
         "get_history_trade_detail_data", "get_value_by_order_id", "get_last_order_id",
@@ -231,9 +256,9 @@ try:
         if function_name in globals():
             qmt_extra[function_name] = globals()[function_name]
     _runtime.bind_runtime_api(
-        passorder_func=passorder,
-        cancel_func=cancel,
-        get_trade_detail_data_func=get_trade_detail_data,
+        passorder_func=globals().get("passorder"),
+        cancel_func=globals().get("cancel"),
+        get_trade_detail_data_func=globals().get("get_trade_detail_data"),
         extra_funcs=qmt_extra or None,
     )
 except NameError:
