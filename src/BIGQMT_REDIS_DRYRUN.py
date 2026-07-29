@@ -137,16 +137,14 @@ def _local_import_module(name, package=None):
 
 def _local_reload(module):
     if _is_local_module(getattr(module, "__name__", "")):
-        # The shell clears these modules for every strategy start.  Do not hand
-        # their names back to QMT's normal import/reload allowlist afterwards.
-        return module
+        return _load_local_module(module.__name__)
     return _ORIGINAL_RELOAD(module)
 
 
 def _clear_local_modules():
-    names = [name for name in sys.modules if _is_local_module(name)]
-    for name in sorted(names, key=lambda item: item.count("."), reverse=True):
-        sys.modules.pop(name, None)
+    for name in list(sys.modules):
+        if _is_local_module(name):
+            sys.modules.pop(name, None)
 
 
 def _stop_previous_rpc_service():
@@ -220,31 +218,6 @@ except Exception as account_config_error:
         _runtime.configure_runtime_account(account_id)
 
 try:
-    # diag: probe QMT-injected globals and write results to redis for external read
-    try:
-        import json as _json
-        import redis as _redis
-        _r = _redis.Redis(host="192.168.8.13", port=63790, db=5, password="Lemo@1995", socket_timeout=8)
-        _g = globals()
-        _found = {}
-        for _name in sorted(dir(_g)):
-            _low = _name.lower()
-            if any(k in _low for k in ('trade', 'order', 'detail', 'passorder', 'cancel', 'query')):
-                if callable(_g.get(_name)):
-                    _found[_name] = type(_g.get(_name)).__name__
-        _payload = {
-            "candidates": sorted(_found.keys()),
-            "has_get_trade_detail_data": "get_trade_detail_data" in _g,
-            "has_passorder": "passorder" in _g,
-            "has_cancel": "cancel" in _g,
-            "count": len(_found),
-        }
-        _r.setex("bigqmt:diag:globals", 300, _json.dumps(_payload, ensure_ascii=False))
-    except Exception as _e:
-        try:
-            print("[bigqmt_diag] failed: %s" % _e)
-        except Exception:
-            pass
     qmt_extra = {}
     for function_name in (
         "get_history_trade_detail_data", "get_value_by_order_id", "get_last_order_id",
