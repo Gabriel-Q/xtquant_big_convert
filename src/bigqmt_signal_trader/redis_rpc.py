@@ -125,10 +125,19 @@ LISTENER_DEFERRED_METHODS = {
     "get_history_trade_detail_data",
 }
 
-# The embedded Big QMT APIs are not thread-safe in this terminal build. Only
-# ping is pure Python and safe on the ZMQ listener thread; every API-backed read
-# must run from the scheduled strategy callback.
-LISTENER_DEFERRED_METHODS.update(READ_METHODS - {"ping"})
+# Trade-context queries route through QMT's get_trade_detail_data, which
+# returns EMPTY when called from the background RPC thread (it needs the main
+# strategy thread's context). Defer them so the adjust drain runs them on the
+# main thread -- costs up to one adjust interval (~500ms) but returns real
+# data. Asset queries use the same QMT detail API and must follow this rule.
+#
+# NOTE: do NOT blanket-defer all READ_METHODS here. Market-data reads
+# (get_full_tick, get_market_data, ...) are thread-safe in the embedded
+# terminal and must stay inline for low latency; the ZMQ transport has no
+# adjust-driven drain for pending requests (its drain_request_queue is a
+# no-op when the router thread exists), so deferring everything would stall
+# them forever. Only the trade-context methods listed above go through drain.
+
 
 METHOD_ALIASES = {
     "get_full_tick": "get_ticks",

@@ -433,6 +433,8 @@ class RedisRpcTest(unittest.TestCase):
         self.assertTrue(response["ok"], response["error"])
 
     def test_process_in_listener_wildcard_only_handles_ping_inline(self):
+        # get_full_tick is a market-data read (thread-safe in embedded terminal),
+        # so it stays inline for low latency and responds immediately.
         redis_client, service = _service_with_listener_methods(
             allow_order_methods=True,
             process_in_listener=True,
@@ -448,8 +450,7 @@ class RedisRpcTest(unittest.TestCase):
             }
         )
 
-        self.assertNotIn("bigqmt:rpc:resp:acct:direct-tick", redis_client.kv)
-        self.assertEqual(service.drain_pending(), 1)
+        # Inline: response written immediately, no pending drain needed.
         response = json.loads(redis_client.kv["bigqmt:rpc:resp:acct:direct-tick"])
         self.assertTrue(response["ok"], response["error"])
         self.assertEqual(response["data"]["600000.SH"]["lastPrice"], 10.5)
