@@ -31,10 +31,10 @@ _ORIGINAL_IMPORT = _builtins.__import__
 
 
 def _known_qmt_python_dir():
-    install = "".join(chr(value) for value in (
-        0x541b, 0x5f18, 0x541b, 0x667a, 0x4ea4, 0x6613, 0x7cfb, 0x7edf,
-    ))
-    return "D:\\" + install + "\\python"
+    for p in sys.path:
+        if p and r"\python" in p and os.path.isdir(p):
+            return p
+    return ""
 
 
 try:
@@ -62,12 +62,19 @@ def _resolve_name(name, module_globals, level):
 
 def _find_source(name):
     relative = name.replace(".", os.sep)
-    package_init = os.path.join(_SOURCE_ROOT, relative, "__init__.py")
-    if os.path.isfile(package_init):
-        return package_init, True
-    module_file = os.path.join(_SOURCE_ROOT, relative + ".py")
-    if os.path.isfile(module_file):
-        return module_file, False
+    dirs = []
+    if _SOURCE_ROOT:
+        dirs.append(_SOURCE_ROOT)
+    for p in sys.path:
+        if p and os.path.isdir(p) and p not in dirs:
+            dirs.append(p)
+    for d in dirs:
+        package_init = os.path.join(d, relative, "__init__.py")
+        if os.path.isfile(package_init):
+            return package_init, True
+        module_file = os.path.join(d, relative + ".py")
+        if os.path.isfile(module_file):
+            return module_file, False
     raise ModuleNotFoundError("local source not found: %s" % name, name=name)
 
 

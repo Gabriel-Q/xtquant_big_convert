@@ -29,13 +29,13 @@ _ORIGINAL_RELOAD = _importlib.reload
 
 
 def _known_qmt_python_dir():
-    # chr()-encoded so GBK save does not mangle the CJK path.
-    # decodes to the actual QMT install dir: D:\<broker>QMT<suffix>_lemo\python
-    root = "".join(chr(value) for value in (
-        0x56fd, 0x91d1, 0x8bc1, 0x5238, 0x51, 0x4d, 0x54,
-    ))
-    suffix = "".join(chr(value) for value in (0x4ea4, 0x6613, 0x7aef))
-    return r"D:\\" + root + suffix + "_lemo\\python"
+    # Find the QMT python dir from sys.path instead of a hardcoded path, so
+    # the bridge loads regardless of broker install location or launch mode
+    # (editor / paste-run / exec). Falls back to empty when not found.
+    for p in sys.path:
+        if p and r"\python" in p and os.path.isdir(p):
+            return p
+    return ""
 
 
 try:
@@ -65,12 +65,19 @@ def _resolve_name(name, module_globals, level):
 
 def _find_local_source(name):
     relative = name.replace(".", os.sep)
-    package_init = os.path.join(_SOURCE_ROOT, relative, "__init__.py")
-    if os.path.isfile(package_init):
-        return package_init, True
-    module_file = os.path.join(_SOURCE_ROOT, relative + ".py")
-    if os.path.isfile(module_file):
-        return module_file, False
+    dirs = []
+    if _SOURCE_ROOT:
+        dirs.append(_SOURCE_ROOT)
+    for p in sys.path:
+        if p and os.path.isdir(p) and p not in dirs:
+            dirs.append(p)
+    for d in dirs:
+        package_init = os.path.join(d, relative, "__init__.py")
+        if os.path.isfile(package_init):
+            return package_init, True
+        module_file = os.path.join(d, relative + ".py")
+        if os.path.isfile(module_file):
+            return module_file, False
     raise ModuleNotFoundError("local source not found: %s" % name, name=name)
 
 
