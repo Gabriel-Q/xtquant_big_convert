@@ -108,50 +108,85 @@ class ExecEventsServerTest(unittest.TestCase):
         publish_order_event(r, "acct", {"event_type": "order"})
         self.assertEqual(r.pubs[1][0], order_channel("acct"))
 
-    def test_action_comes_from_direction_not_offset_flag(self):
+    def test_arbitration_resolves_direction_offset_conflict_via_op_type(self):
+        """When m_nDirection and m_nOffsetFlag disagree (futures: sell+open),
+        arbitration via m_nOpType picks the semantically correct field."""
         class Deal:
             m_strInstrumentID = "600000.SH"
-            m_nDirection = 49   # EEntrustBS sell
-            m_nOffsetFlag = 48  # offset 48 = 开仓 (open) — must NOT be read as buy
+            m_nDirection = 49    # EEntrustBS sell
+            m_nOffsetFlag = 48   # offset 48 = 开仓 (open)
+            m_nOpType = 24       # STOCK_SELL — arbiter confirms sell
             m_nVolume = 10
             m_dPrice = 1.0
             m_strTradeID = "X"
 
         ev = normalize_trade_event(Deal(), "acct")
 
-        self.assertEqual(ev["action"], "SELL")   # derived from m_nDirection
-        self.assertEqual(ev["offset_flag"], 48)  # raw offset preserved, not conflated
+        self.assertEqual(ev["action"], "SELL")       # from direction via arbitration
+        self.assertEqual(ev["direction"], 49)        # direction field = m_nDirection
+        self.assertEqual(ev["offset_flag"], 48)      # raw offset preserved, not conflated
 
-    def test_direction_falls_back_to_offset_when_direction_missing(self):
-        """Live bug: m_nDirection is 0/None at certain callback moments,
-        causing sell orders to be misread as buy. Fall back to m_nOffsetFlag
-        (matches query_orders, which works correctly in production)."""
+    def test_arbitration_stock_sell_wrong_direction_fixed_by_op_type(self):
+        """Stock sell: m_nDirection=48 (bug: always 48), m_nOffsetFlag=49,
+        m_nOpType=24 → arbitration picks offset (49→SELL)."""
         class SellOrder:
             m_strInstrumentID = "601398.SH"
-            m_nDirection = 0       # absent/zero in live callback (the bug)
-            m_nOffsetFlag = 49     # 平仓 = sell for stocks
+            m_nDirection = 48       # QMT bug — always 48 in live callbacks
+            m_nOffsetFlag = 49      # 平仓 = sell (correct)
+            m_nOpType = 24          # STOCK_SELL (correct)
             m_nVolumeTotal = 100
             m_nVolumeTraded = 0
             m_dLimitPrice = 6.34
             m_strOrderSysID = "S123"
 
         ev = normalize_order_event(SellOrder(), "acct")
-        self.assertEqual(ev["action"], "SELL")  # from offset_flag, not 0/None
-        self.assertEqual(ev["direction"], 49)
+        self.assertEqual(ev["action"], "SELL")
+        self.assertEqual(ev["direction"], 49)       # offset_flag wins via arbitration
 
-    def test_direction_falls_back_to_offset_when_direction_none(self):
-        """Same bug with direction=None entirely."""
+    def test_arbitration_stock_buy_agree(self):
+        """Stock buy: m_nDirection=48, m_nOffsetFlag=48 → agree → BUY."""
         class BuyOrder:
             m_strInstrumentID = "601398.SH"
-            m_nDirection = None
-            m_nOffsetFlag = 48     # 开仓 = buy for stocks
+            m_nDirection = 48
+            m_nOffsetFlag = 48
+            m_nOpType = 23
             m_nVolumeTotal = 100
             m_nVolumeTraded = 0
-            m_dLimitPrice = 6.34
+            m_dLimitPrice = 5.0
             m_strOrderSysID = "B456"
 
         ev = normalize_order_event(BuyOrder(), "acct")
-        self.assertEqual(ev["action"], "BUY")   # from offset_flag
+        self.assertEqual(ev["action"], "BUY")
+        self.assertEqual(ev["direction"], 48)
+
+    def test_direction_zero_falls_back_to_offset(self):
+        """m_nDirection=0 is treated as absent; offset determines direction."""
+        class SellOrder:
+            m_strInstrumentID = "601398.SH"
+            m_nDirection = 0
+            m_nOffsetFlag = 49
+            m_nVolumeTotal = 100
+            m_nVolumeTraded = 0
+            m_dLimitPrice = 6.34
+            m_strOrderSysID = "S123"
+
+        ev = normalize_order_event(SellOrder(), "acct")
+        self.assertEqual(ev["action"], "SELL")
+        self.assertEqual(ev["direction"], 49)
+
+    def test_direction_none_falls_back_to_offset(self):
+        """m_nDirection=None → offset determines direction."""
+        class BuyOrder:
+            m_strInstrumentID = "601398.SH"
+            m_nDirection = None
+            m_nOffsetFlag = 48
+            m_nVolumeTotal = 100
+            m_nVolumeTraded = 0
+            m_dLimitPrice = 5.0
+            m_strOrderSysID = "B456"
+
+        ev = normalize_order_event(BuyOrder(), "acct")
+        self.assertEqual(ev["action"], "BUY")
         self.assertEqual(ev["direction"], 48)
 
     def test_pledge_direction_has_no_buy_sell_action(self):
