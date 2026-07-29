@@ -236,15 +236,16 @@ def _is_redis_transport(transport_name):
 def _resolve_background_threads(transport_name, configured):
     """Decide whether the RPC service runs its own background receive threads.
 
-    ZMQ supports the QMT adjust-drain path and therefore honors the configured
-    value. Other non-Redis transports still require their receiver threads.
+    Redis honors the configured value because it has a blocking brpop path AND
+    an adjust-driven lpop drain. ZMQ and all other transports MUST run their
+    receiver threads — without the background router loop, requests are never
+    received (ZMQ's start_receiving(background_threads=False) only binds the
+    socket and does not poll it).
     """
     normalized = str(transport_name or "redis").lower()
-    if normalized == "zmq":
+    if _is_redis_transport(normalized):
         return bool(configured)
-    if not _is_redis_transport(normalized):
-        return True
-    return bool(configured)
+    return True
 
 
 def _build_rpc_service(context_info, app, config):

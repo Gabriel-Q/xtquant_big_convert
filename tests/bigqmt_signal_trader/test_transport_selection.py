@@ -18,9 +18,12 @@ class BackgroundThreadResolutionTest(unittest.TestCase):
         self.assertFalse(_resolve_background_threads("default", False))
         self.assertFalse(_resolve_background_threads(None, False))
 
-    def test_zmq_transport_keeps_configured_value(self):
-        self.assertFalse(_resolve_background_threads("zmq", False))
-        self.assertFalse(_resolve_background_threads("ZMQ", False))
+    def test_zmq_transport_forces_background_threads_on(self):
+        # ZMQ must run its background router thread regardless of config —
+        # without it, requests are never received (start_receiving(False)
+        # only binds the socket, never polls it).
+        self.assertTrue(_resolve_background_threads("zmq", False))
+        self.assertTrue(_resolve_background_threads("ZMQ", False))
         self.assertTrue(_resolve_background_threads("zmq", True))
 
     def test_other_non_redis_transports_force_background_threads_on(self):
