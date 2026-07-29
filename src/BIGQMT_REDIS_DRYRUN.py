@@ -29,10 +29,13 @@ _ORIGINAL_RELOAD = _importlib.reload
 
 
 def _known_qmt_python_dir():
-    install = "".join(chr(value) for value in (
-        0x541b, 0x5f18, 0x541b, 0x667a, 0x4ea4, 0x6613, 0x7cfb, 0x7edf,
+    # chr()-encoded so GBK save does not mangle the CJK path.
+    # decodes to: D:\国金证券QMT交易端_lemo\python
+    root = "".join(chr(value) for value in (
+        0x56fd, 0x91d1, 0x8bc1, 0x5238, 0x51, 0x4d, 0x54,
     ))
-    return r"D:\君弘君智交易系统\python"
+    suffix = "".join(chr(value) for value in (0x4ea4, 0x6613, 0x7aef))
+    return r"D:\\" + root + suffix + "_lemo\\python"
 
 
 try:
