@@ -145,6 +145,41 @@ python examples/zmq_backtest_strategy.py `
 QMT 原生安装、逐 Bar 同步协议、CSV 备用模式和安全边界见
 [docs/ZMQ_BACKTEST_BRIDGE.md](docs/ZMQ_BACKTEST_BRIDGE.md)。
 
+### 无 redis 版本（QMT 沙箱拒绝 import redis 时用）
+
+如果你的 QMT 环境**拒绝 `import redis`**（券商白名单拦截），用 `bigqmt_no_redis/` 目录下的无 redis 版本：
+
+- `bigqmt_no_redis/zmq_transport.py` — 自包含的 ZMQ transport，内联所有编码函数，**完全不 import redis_common/redis_rpc**，去掉 redis 服务发现（用静态派生端口）
+- `bigqmt_no_redis/DRYRUN_no_redis.py` — 无 redis 的 DRYRUN 入口，强制 `transport=zmq` + `background_threads=True`，只加载 zmq transport
+
+**用法**：QMT 策略编辑器加载 `BIGQMT_DRYRUN_NO_REDIS.py`（同步到 QMT 目录时用这个文件名），RPC 走纯 ZMQ，零 redis 依赖。其余功能（行情/交易/持仓查询）与标准版一致。
+
+### 委托/成交查询的 strategy_name 陷阱（重要）
+
+`get_trade_detail_data` 按 `strategy_name` 过滤委托/成交——**下单时用的 strategy_name 必须和查询时一致**，否则查不到。
+
+- 下单时传 `strategy_name="rpc_test"` → 委托记在 `rpc_test` 下
+- 查询时传 `strategy_name="bigqmt_signal_trader"` → 返回空（不匹配）
+
+**修复**：`query_orders` / `query_trades` 默认传**空字符串 `""`**，返回该账户的**全部**委托/成交（不按 strategy_name 过滤）。如需过滤，显式传 `strategy_name`。
+
+实测验证（`get_trade_detail_data` 探测）：
+- `st=""` → ORDER=9, DEAL=9（全部）
+- `st="rpc_test"` → ORDER=3, DEAL=1（只有 rpc_test 的）
+- `st="bigqmt_signal_trader"` → ORDER=0, DEAL=0（空）
+
+### 实盘卖出方向误判修复（exec_events）
+
+实盘发现：QMT 回调里 `m_nDirection` **恒为 48**（即使是卖出），导致卖出被误判为买入。
+
+修复（`exec_events._extract_direction`）改为仲裁链：
+1. `m_nOffsetFlag`（最可靠，匹配 `query_orders`）
+2. `m_nDirection`（传统 EEntrustBS，但实盘可能恒为 48）
+3. 当 direction≠offset（期货：卖+开仓=49+48），用 `m_nOpType`（23=买/24=卖）仲裁
+4. `m_nOpType`/`order_type`（兜底）
+
+对股票现货，direction=offset（48=买/49=卖）；对期货，direction≠offset，仲裁保正确。
+
 ---
 
 ## 环境要求与依赖安装

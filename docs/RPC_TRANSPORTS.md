@@ -1,6 +1,6 @@
 # 可插拔 RPC 传输层
 
-更新时间：2026-07-02
+更新时间：2026-07-29
 
 ## 目标
 
@@ -14,6 +14,15 @@
 | `shm` | — | ❌ | — | 留接口未实现（需 Python 3.8+）|
 
 切换传输**只改一个配置字段 `transport`**，业务代码（handlers / `to_jsonable` / `process_request`）零改动。
+
+## 无 redis 版本（QMT 沙箱拒绝 import redis 时用）
+
+如果 QMT 环境**拒绝 `import redis`**（券商白名单拦截），用 `bigqmt_no_redis/` 目录下的无 redis 版本：
+
+- `bigqmt_no_redis/zmq_transport.py` — 自包含的 ZMQ transport，内联所有编码函数（`decode_text`/`encode_rpc_request_payload`/`decode_rpc_request_payload`），**完全不 import redis_common/redis_rpc**，去掉 redis 服务发现（用静态派生端口）
+- `bigqmt_no_redis/DRYRUN_no_redis.py` — 无 redis 的 DRYRUN 入口，强制 `transport=zmq` + `background_threads=True`，只加载 zmq transport
+
+**用法**：QMT 策略编辑器加载 `BIGQMT_DRYRUN_NO_REDIS.py`（同步到 QMT 目录时用这个文件名），RPC 走纯 ZMQ，零 redis 依赖。
 
 ## 架构
 

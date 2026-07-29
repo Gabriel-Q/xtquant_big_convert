@@ -238,14 +238,16 @@
 - **返回**：单个持仓 dict（同上 value 结构），无持仓返回 `None`。
 
 ### `query_orders`
-- **参数**：`account_id`(可选) `strategy_name`(str, 默认 "bigqmt_signal_trader") `cancelable_only`(bool)
+- **参数**：`account_id`(可选) `strategy_name`(str, 默认 `""` 返回全部) `cancelable_only`(bool)
 - **返回**：`list[OrderSnapshot]`，每项含 `order_sys_id`/`user_order_id`/`stock_code`/`action`/`volume`/`traded_volume`/`status`/`price` 等。
 - **实现**：`get_trade_detail_data(account, type, "ORDER", strategy)`。
+- **strategy_name 陷阱（重要）**：`get_trade_detail_data` 按 `strategy_name` 过滤委托——下单时用的 strategy_name 必须和查询时一致。默认传 `""` 返回全部委托（不按 strategy_name 过滤）。如需过滤，显式传 `strategy_name`。
 - **容错**：QMT 上下文未绑定时报错，降级为 `[]`。
 
 ### `query_trades`
-- **参数**：`account_id`(可选) `strategy_name`(str)
+- **参数**：`account_id`(可选) `strategy_name`(str, 默认 `""` 返回全部)
 - **返回**：成交明细 `list`。
+- **strategy_name 陷阱**：同 `query_orders`，默认 `""` 返回全部成交。
 
 ---
 
