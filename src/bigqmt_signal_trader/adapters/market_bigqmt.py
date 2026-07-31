@@ -518,16 +518,22 @@ class BigQmtMarketDataProvider:
         return self._call_context("get_his_option_list_batch", undl_code, start_time, end_time)
 
     def get_financial_data(self, stock_list, table_list=None, start_time="", end_time="", report_type="report_time"):
+        # ContextInfo stub signature: get_financial_data(fieldList, stockList, startDate, endDate, report_type)
+        # — fieldList (table_list) comes FIRST, stockList SECOND. Our public API keeps
+        # the xtdata order (stock_list, table_list) so callers don't change, but we
+        # must swap when forwarding to ContextInfo.
         return self._call_context(
             "get_financial_data",
-            stock_list,
             table_list or [],
+            stock_list,
             start_time,
             end_time,
             report_type,
         )
 
     def download_financial_data(self, stock_list, table_list=None, start_time="", end_time="", incrementally=None):
+        # download_financial_data is an xtdata SDK function, not a ContextInfo method.
+        # Try native SDK first, fall back to ContextInfo (may raise NotImplementedError).
         kwargs = {
             "stock_list": stock_list,
             "table_list": table_list or [],
@@ -536,10 +542,17 @@ class BigQmtMarketDataProvider:
         }
         if incrementally is not None:
             kwargs["incrementally"] = incrementally
-        return self._call_context("download_financial_data", **kwargs)
+        def _via_context():
+            return self._call_context("download_financial_data", **kwargs)
+        return self._native_or_context("download_financial_data", _via_context, **kwargs)
 
     def download_financial_data2(self, stock_list, table_list=None, start_time="", end_time=""):
-        return self._call_context("download_financial_data2", stock_list, table_list or [], start_time, end_time)
+        # download_financial_data2 is an xtdata SDK function, not a ContextInfo method.
+        def _via_context():
+            return self._call_context("download_financial_data2", stock_list, table_list or [], start_time, end_time)
+        return self._native_or_context(
+            "download_financial_data2", _via_context, stock_list, table_list or [], start_time, end_time
+        )
 
     # Well-known sector names that Big QMT's ContextInfo recognises for
     # get_stock_list_in_sector / get_sector. Used as a fallback when the full
