@@ -184,6 +184,39 @@ QMT 原生安装、逐 Bar 同步协议、CSV 备用模式和安全边界见
 
 ## 环境要求与依赖安装
 
+### 作为 Python 包安装（推荐）
+
+本项目已发布为正式 Python 包，可直接 pip 安装：
+
+```powershell
+# 基础安装（含 pyzmq，zmq 传输必需）
+pip install xtquant-big-convert
+
+# 含 redis 支持（redis 传输）
+pip install xtquant-big-convert[redis]
+
+# 含 mysql 支持（mysql 传输）
+pip install xtquant-big-convert[mysql]
+
+# 开发环境（含测试工具）
+pip install xtquant-big-convert[dev]
+
+# 从源码安装（开发模式）
+git clone https://github.com/litaolemo/xtquant_big_convert.git
+cd xtquant_big_convert
+pip install -e .
+```
+
+安装后可直接 import：
+
+```python
+from bigqmt_signal_trader.xtquant_compat import configure, xt_trader, xtdata
+from bigqmt_signal_trader.transports.factory import build_transport
+
+configure()
+print(xtdata.get_full_tick(["000001.SZ"]))
+```
+
 ### 大 QMT 端（服务端）
 
 QMT 自带 Python 3.6（`bin.x64/python.exe`），需要按所选传输安装依赖：
