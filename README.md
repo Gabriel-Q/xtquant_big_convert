@@ -510,6 +510,52 @@ python -m pytest tests/bigqmt_signal_trader/ -q
 
 当前覆盖 **77 个用例**（含传输层往返、Redis RPC、客户端兼容、持仓/行情/下单 handlers）。
 
+### 端到端 API 测试（发现生产问题）
+
+`test_all_apis.py` 是**端到端验证**测试——不只测「调用成功」，还测「结果正确」，能发现这些生产问题：
+
+| 验证项 | 检测什么 | 为什么重要 |
+|--------|---------|-----------|
+| **客户端/服务端一致性** | ping 超时 → transport 不匹配 | Issue #24 根因：客户端 redis / 服务端 zmq 连不上 |
+| **持仓查询** | `get_positions` 返回空但账户有持仓 | 容错设计把「失败返回空」当成「正常」 |
+| **委托查询** | `query_orders` 返回空 | strategy_name 不匹配（默认应为 `""` 返回全部） |
+| **买入/卖出** | `submit_order` 成功但委托没进系统 | 静默失败（passorder 被 QMT 拒绝但没报错） |
+| **server_error** | 显示 QMT 端拒绝原因 | 委托被 QMT 静默拒绝时返回具体原因 |
+
+**用法**：
+```powershell
+# 方式 A：用环境变量
+$env:BIGQMT_ACCOUNT_ID="你的账号"
+$env:BIGQMT_REDIS_HOST="你的Redis地址"
+$env:BIGQMT_REDIS_PORT="6379"
+$env:BIGQMT_REDIS_DB="5"
+$env:BIGQMT_REDIS_PASSWORD="你的密码"
+python test_all_apis.py
+
+# 方式 B：用 QMT 端配置（需 bigqmt_signal_trader_local_config.py 在 PYTHONPATH）
+$env:PYTHONPATH="D:\国金证券QMT交易端\python;$env:PYTHONPATH"
+python test_all_apis.py
+```
+
+**示例输出**（发现问题时）：
+```
+--- 端到端验证: 客户端/服务端一致性 ---
+客户端配置 transport: redis
+❌ ping 失败: redis rpc timeout: ping
+   可能原因: 客户端 transport 和服务端不匹配
+   - 客户端配置 transport=redis
+   - 如果服务端是 zmq, 客户端也要设 transport=zmq
+
+--- 端到端验证: 持仓查询 ---
+⚠️  get_positions 返回空 — 账户可能真的没持仓, 或查询失败 (检查 QMT 上下文)
+
+--- 端到端验证: 买入/卖出 ---
+✅ submit_order OK
+❌ 委托没进系统 — submit_order 成功但 query_orders 找不到
+   这是静默失败 (passorder 被 QMT 拒绝但没报错)
+   检查: 1) 价格是否超出范围 2) 账户权限 3) QMT 风控
+```
+
 ---
 
 ## 安全默认值
