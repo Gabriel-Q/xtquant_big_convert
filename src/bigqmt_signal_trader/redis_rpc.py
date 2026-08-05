@@ -354,6 +354,9 @@ class BigQmtRpcHandlers:
         # 融资融券查询等)。由 strategy._build_config 解析注入。
         self.qmt_api = dict(qmt_api or {})
         self._submit_journal = {}
+        # Server-side diagnostic for silent failures (e.g. passorder submitted
+        # but order not found in system). Surfaced to client via server_error.
+        self._last_server_error = ""
         if allowed_methods is None:
             allowed = set(READ_METHODS)
             if self.allow_order_methods:
@@ -667,7 +670,31 @@ class BigQmtRpcHandlers:
             raise ValueError("stock_code is required")
         if request.volume <= 0:
             raise ValueError("volume must be positive")
-        return self.order_gateway.submit(request)
+
+        result = self.order_gateway.submit(request)
+
+        # 委托后校验：确认委托是否真的进了系统。passorder 调用成功但委托没进
+        # 系统时（静默失败），记录 server_error 让客户端知道。
+        self._last_server_error = ""
+        try:
+            import time as _time
+            _time.sleep(0.5)  # 给 QMT 处理委托的时间
+            orders = self.order_gateway.query_orders(request.account_id, "")
+            if not any(
+                str(o.get("stock_code") or "").upper() == request.stock_code.upper()
+                and str(o.get("action") or "").upper() == request.action.upper()
+                for o in (orders or [])
+            ):
+                self._last_server_error = (
+                    "passorder submitted but order not found in system "
+                    "(stock=%s action=%s price=%.2f volume=%d). "
+                    "QMT may have silently rejected it (check price range / permissions)."
+                    % (request.stock_code, request.action, request.price, request.volume)
+                )
+        except Exception:
+            # 校验失败不影响主流程（委托已提交）
+            pass
+        return result
 
     def _handle_submit_orders_batch(self, params):
         orders = params.get("orders") or []
@@ -1109,13 +1136,23 @@ class RedisPubSubRpcService:
             "ok": False,
             "data": None,
             "error": "",
+            # server_error carries QMT-side diagnostic info (e.g. passorder
+            # submitted but order not found in system, get_trade_detail_data
+            # returned empty) that doesn't raise an exception but indicates a
+            # problem. Lets clients see why an operation silently failed.
+            "server_error": "",
             "handled_at": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         try:
             if self.account_id and account_id and account_id != self.account_id:
                 raise PermissionError("account_id mismatch")
-            response["data"] = to_jsonable(self.handlers.handle(method, request.get("params") or {}))
+            result = self.handlers.handle(method, request.get("params") or {})
+            response["data"] = to_jsonable(result)
             response["ok"] = True
+            # Surface server-side diagnostics when the handler recorded one.
+            server_error = getattr(self.handlers, "_last_server_error", None)
+            if server_error:
+                response["server_error"] = str(server_error)
         except Exception as exc:
             response["error"] = "%s: %s" % (exc.__class__.__name__, exc)
         self._publish_response(request, response)

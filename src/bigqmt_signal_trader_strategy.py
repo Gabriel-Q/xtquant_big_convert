@@ -573,7 +573,50 @@ def init(ContextInfo):
     _start_rpc_service(ContextInfo, app, config)
     _schedule_adjust_if_needed(ContextInfo, config)
     print("[bigqmt_signal_trader] init ok")
+
+    # 启动时自动诊断：检测服务状态 + 关键函数绑定，方便发现问题
+    _diag_startup(ContextInfo, config)
     return app
+
+
+def _diag_startup(ContextInfo, config):
+    """Startup diagnostics: check service status and key function bindings.
+
+    Prints a summary to the QMT log so users can quickly see if the RPC service
+    is up, which transport is active, and whether key QMT functions (passorder,
+    get_trade_detail_data) are bound. Helps diagnose "service won't start" issues.
+    """
+    print("=" * 60)
+    print("[bigqmt_diag] startup diagnostics")
+    print("=" * 60)
+
+    # 1. RPC service status
+    rpc_config = dict(config.get("rpc") or {})
+    transport = rpc_config.get("transport", "redis")
+    print("[bigqmt_diag] transport=%s" % transport)
+    if _rpc_service is not None:
+        print("[bigqmt_diag] rpc_service=running (type=%s)" % type(_rpc_service).__name__)
+    else:
+        print("[bigqmt_diag] rpc_service=NOT STARTED (check enable_rpc / errors above)")
+
+    # 2. Key QMT function bindings
+    qmt_api = dict(config.get("qmt_api") or {})
+    for name in ("passorder", "cancel", "get_trade_detail_data"):
+        bound = qmt_api.get(name) is not None
+        print("[bigqmt_diag] %s bound=%s" % (name, bound))
+
+    # 3. Quick connectivity test (get_full_tick)
+    try:
+        tick = ContextInfo.get_full_tick(["000001.SZ"])
+        if tick:
+            print("[bigqmt_diag] get_full_tick=OK (keys=%d)" % len(tick))
+        else:
+            print("[bigqmt_diag] get_full_tick=EMPTY (market may be closed)")
+    except Exception as e:
+        print("[bigqmt_diag] get_full_tick=FAIL: %s" % str(e)[:60])
+
+    print("[bigqmt_diag] diagnostics complete")
+    print("=" * 60)
 
 
 def _pump_download_jobs(context_info, config):
