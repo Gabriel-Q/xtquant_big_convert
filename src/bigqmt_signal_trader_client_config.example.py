@@ -17,6 +17,19 @@ BIGQMT_REDIS_CONFIG = {
     "db": 5,
     "username": "",
     "password": "",
+    # Transport selection. Must match the QMT-side server config. Default
+    # "redis" works with the standard DRYRUN; use "zmq" when the server runs
+    # with transport=zmq (e.g. the no-redis version or explicit zmq mode).
+    "transport": "redis",
+    # ZMQ-specific settings (only used when transport=zmq):
+    # "zmq": {
+    #     # Explicit connect address. The QMT-side server binds a port derived
+    #     # from account_id (default 15563 for account 8886800503). If you know
+    #     # the exact address, set it here to skip service discovery.
+    #     "connect_address": "tcp://127.0.0.1:15563",
+    #     # "host": "127.0.0.1",
+    #     # "port": 15563,
+    # },
 }
 
 # Default direct mode calls get_full_tick through RPC. Set enabled=True only when
