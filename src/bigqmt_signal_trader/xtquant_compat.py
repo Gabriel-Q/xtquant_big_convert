@@ -130,6 +130,47 @@ def _import_optional_module(module_name):
         raise
 
 
+def _quote_client_id():
+    """Process-stable client id for whole-quote subscriptions. Config or env wins;
+    otherwise read/create a persisted id so a restarted client is recognised as
+    the same subscriber by the server."""
+    client_config = load_client_config()
+    configured = client_config.get("quote_client_id") or os.environ.get("BIGQMT_QUOTE_CLIENT_ID")
+    if configured:
+        return str(configured)
+    cache_path = os.path.join(os.path.expanduser("~"), ".cache", "bigqmt", "quote_client_id")
+    try:
+        with open(cache_path, "r") as handle:
+            existing = handle.read().strip()
+            if existing:
+                return existing
+    except OSError:
+        pass
+    new_id = uuid.uuid4().hex
+    try:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "w") as handle:
+            handle.write(new_id)
+    except OSError:
+        pass
+    return new_id
+
+
+def _quote_push_zmq_address(client):
+    """Derive the server whole-quote PUB address: same host as the RPC zmq
+    endpoint, RPC port + 1 (the PUB socket binds a distinct port)."""
+    from .transports.zmq_transport import DEFAULT_ZMQ_HOST, _default_zmq_port
+
+    zmq_config = dict(getattr(client, "zmq_config", {}) or {})
+    explicit = zmq_config.get("quote_push_connect_address")
+    if explicit:
+        return str(explicit)
+    host = zmq_config.get("host") or DEFAULT_ZMQ_HOST
+    port = zmq_config.get("port")
+    base_port = int(port) if port is not None else _default_zmq_port(client.account_id)
+    return "tcp://%s:%d" % (host, base_port + 1)
+
+
 def load_client_config(module_name=None):
     """Load local private client config without requiring environment variables."""
     candidates = []
@@ -171,6 +212,7 @@ def load_client_config(module_name=None):
             "full_tick_cache_config": full_tick_cache_config,
             "local_cache_config": local_cache_config,
             "formula_server_config": formula_server_config,
+            "quote_client_id": getattr(module, "BIGQMT_QUOTE_CLIENT_ID", None),
         }
     return {}
 
@@ -530,6 +572,8 @@ class BigQmtXtData:
         self.client = client
         self._subscribe_seq = int(time.time() * 1000)
         self._cache_obj = None
+        self._quote_session = None          # lazily built WholeQuoteClientSession
+        self._quote_session_factory = None  # test hook: returns a session-like object
 
     def _next_seq(self):
         self._subscribe_seq += 1
@@ -778,19 +822,66 @@ class BigQmtXtData:
             callback=callback,
         )
 
+    def _whole_quote_session(self):
+        if self._quote_session is None:
+            if self._quote_session_factory is not None:
+                self._quote_session = self._quote_session_factory()
+            else:
+                self._quote_session = self._build_quote_session()
+        return self._quote_session
+
+    def _build_quote_session(self):
+        from .whole_quote_session import WholeQuoteClientSession
+
+        client = self.client
+
+        def rpc_call(method, params):
+            return client.call(method, params)
+
+        return WholeQuoteClientSession(
+            rpc_call=rpc_call,
+            push_channel=self._build_quote_push_channel(),
+            client_id=_quote_client_id(),
+            heartbeat_interval_seconds=_env_float("BIGQMT_QUOTE_HEARTBEAT_SECONDS", 3.0),
+            sub_id_func=self._next_seq,
+        )
+
+    def _build_quote_push_channel(self):
+        """Build the push-channel subscriber matching the RPC transport: redis
+        deployments derive the channel locally; zmq deployments connect to the
+        server PUB socket (host from zmq config, RPC port + 1)."""
+        client = self.client
+        from .quote_push_channel import RedisQuotePushChannel, ZmqQuotePushChannel
+
+        transport_name = str(getattr(client, "transport_name", "redis") or "redis").lower()
+        if transport_name in ("zmq",):
+            address = _quote_push_zmq_address(client)
+            return ZmqQuotePushChannel(connect_address=address)
+        return RedisQuotePushChannel(client._redis(), account_id=client.account_id)
+
     def subscribe_whole_quote(self, code_list, callback=None):
-        seq = self._next_seq()
-        payload = {"seq": seq, "code_list": list(code_list or []), "period": "full_tick"}
-        self.client.save_quote_subscription(seq, payload, active=True)
-        self.client.publish_event("subscribe_whole_quote", payload)
+        session = self._whole_quote_session()
+        session.start()
+        sub_id = session.subscribe_whole_quote(code_list, callback=callback)
+        # The big-QMT whole-quote callback is incremental (changed symbols only),
+        # so prime the callback once with a full get_full_tick snapshot.
         if callback is not None:
-            callback(self.get_full_tick(code_list))
-        return seq
+            try:
+                callback(self.get_full_tick(code_list))
+            except Exception:
+                pass
+        return sub_id
 
     def unsubscribe_quote(self, seq):
-        payload = {"seq": seq}
-        self.client.save_quote_subscription(seq, payload, active=False)
-        self.client.publish_event("unsubscribe_quote", payload)
+        # subscribe_whole_quote handles are owned by the push session; single-stock
+        # subscribe_quote seqs still retire through the legacy redis-event path.
+        session = self._quote_session
+        if session is not None and session.has_subscription(seq):
+            session.unsubscribe_quote(seq)
+        else:
+            payload = {"seq": seq}
+            self.client.save_quote_subscription(seq, payload, active=False)
+            self.client.publish_event("unsubscribe_quote", payload)
         return 0
 
     def run(self):
