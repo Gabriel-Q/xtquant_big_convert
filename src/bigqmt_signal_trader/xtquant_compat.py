@@ -1267,6 +1267,7 @@ class BigQmtXtTrader:
     def connect(self):
         if self.client.account_id:
             self.client.call("ping")
+        self._fire_account_status()
         return 0
 
     def subscribe(self, account):
@@ -1275,6 +1276,7 @@ class BigQmtXtTrader:
         # (Re)start the listener now that the account is known; the loop resubscribes
         # to the account's channels within ~1s if the account changed.
         self._start_event_listener()
+        self._fire_account_status()
         return 0
 
     def stop(self):
@@ -1293,6 +1295,27 @@ class BigQmtXtTrader:
             target=self._event_loop, name="bigqmt-exec-events", daemon=True
         )
         self._event_thread.start()
+
+    def _fire_account_status(self):
+        """Fire on_account_status after connect/subscribe (MiniQMT parity).
+
+        Big QMT has no per-strategy account-status push; we synthesize a
+        CONNECTED status once the RPC link is up so client code that waits
+        for on_account_status before trading keeps working.
+        """
+        callback = self.callback
+        if callback is None:
+            return
+        try:
+            callback.on_account_status(
+                CompatObject(
+                    account_id=str(self.client.account_id or ""),
+                    account_type="STOCK",
+                    status=1,  # ACCOUNT_STATUS_ONLINE (MiniQMT XtAccountStatus)
+                )
+            )
+        except Exception:
+            pass
 
     def _event_loop(self):
         from .exec_events import (
@@ -1597,6 +1620,7 @@ class BigQmtXtTrader:
                             error_id=getattr(exc, "errno", 0),
                             error_msg=str(exc),
                             order_sys_id="",
+                            order_id="",
                             stock_code=str(kwargs.get("stock_code") or (args[1] if len(args) > 1 else "")),
                         )
                     )
@@ -1606,11 +1630,16 @@ class BigQmtXtTrader:
         callback = self.callback
         if callback is not None:
             try:
+                # Align with native XtOrderResponse: account_id, order_id, seq.
+                order_sys_id = str(result.get("order_sys_id") or result.get("order_sysid") or "") if isinstance(result, dict) else str(result)
                 callback.on_order_stock_async_response(
                     seq,
                     CompatObject(
-                        order_sys_id=str(result.get("order_sys_id") or result.get("order_sysid") or "") if isinstance(result, dict) else str(result),
-                        order_id=str(result.get("order_sys_id") or result.get("user_order_id") or "") if isinstance(result, dict) else str(result),
+                        account_id=self.client.account_id,
+                        seq=seq,
+                        order_id=order_sys_id or str(result.get("user_order_id") or "") if isinstance(result, dict) else str(result),
+                        order_sys_id=order_sys_id,
+                        stock_code=str(kwargs.get("stock_code") or (args[1] if len(args) > 1 else "")),
                     ),
                 )
             except Exception:
@@ -1840,8 +1869,11 @@ class BigQmtXtTrader:
                 callback.on_cancel_order_stock_async_response(
                     seq,
                     CompatObject(
+                        account_id=self.client.account_id,
+                        seq=seq,
                         success=bool(ok),
                         order_sys_id=str(order_id or ""),
+                        order_id=str(order_id or ""),
                     ),
                 )
             except Exception:
