@@ -1648,16 +1648,19 @@ class BigQmtXtTrader:
         callback = self.callback
         if callback is not None:
             try:
-                # Align with native XtOrderResponse: account_id, order_id, seq.
+                # Align with native XtOrderResponse: callback takes ONE arg
+                # (response) carrying account_id/order_id/seq/error_msg.
                 order_sys_id = str(result.get("order_sys_id") or result.get("order_sysid") or "") if isinstance(result, dict) else str(result)
                 callback.on_order_stock_async_response(
-                    seq,
                     CompatObject(
                         account_id=self.client.account_id,
                         seq=seq,
                         order_id=order_sys_id or str(result.get("user_order_id") or "") if isinstance(result, dict) else str(result),
                         order_sys_id=order_sys_id,
                         stock_code=stock_code,
+                        strategy_name=str(kwargs.get("strategy_name") or (args[6] if len(args) > 6 else "")),
+                        order_remark=str(kwargs.get("order_remark") or (args[7] if len(args) > 7 else "")),
+                        error_msg="",
                     ),
                 )
             except Exception:
@@ -1885,7 +1888,6 @@ class BigQmtXtTrader:
         if callback is not None:
             try:
                 callback.on_cancel_order_stock_async_response(
-                    seq,
                     CompatObject(
                         account_id=self.client.account_id,
                         seq=seq,
@@ -1921,10 +1923,12 @@ class BigQmtXtTrader:
         if callback is not None:
             try:
                 callback.on_cancel_order_stock_async_response(
-                    seq,
                     CompatObject(
+                        account_id=self.client.account_id,
+                        seq=seq,
                         success=bool(ok),
                         order_sys_id=str(order_sysid or ""),
+                        order_id=str(order_sysid or ""),
                     ),
                 )
             except Exception:
