@@ -1629,6 +1629,11 @@ class BigQmtXtTrader:
                     pass
             return seq
         # MiniQMT: order_stock returns -1 when the order failed to submit.
+        # NOTE: the server also pushes an order_error event for 废单 (via
+        # exec_events), so a client may see this -1 error AND the server's
+        # order_error — they carry different info (RPC submit failure vs QMT
+        # rejection detail). We fire it only when the callback was registered,
+        # keeping both signals available to the client.
         if isinstance(result, int) and result == -1:
             callback = self.callback
             if callback is not None:
