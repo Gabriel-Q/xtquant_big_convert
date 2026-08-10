@@ -62,6 +62,7 @@ _config = {}
 _qmt_api = {}
 _adjust_logged = False
 _rpc_service = None
+_quote_subscription_service = None  # (QuoteSubscriptionManager, QuotePushChannel)
 _scheduled_adjust = False
 # Latency tuning / diagnostics (server side, in the Big QMT process).
 #  - switch interval: hand the GIL to the background RPC thread ~5x more often
@@ -248,6 +249,37 @@ def _resolve_background_threads(transport_name, configured):
     return True
 
 
+def _build_quote_subscription_service(context_info, config, transport_name, account_id, redis_client):
+    """Assemble the server-side whole-quote push service (manager + channel).
+
+    Returns ``(manager, channel)`` or ``None`` when disabled. The channel publisher
+    is started in ``_start_rpc_service`` once the RPC service is up; the manager's
+    reaper is fed from ``_drain_rpc_service``.
+    """
+    quote_config = dict(config.get("quote_push") or {})
+    enabled = _config_bool(quote_config.get("enabled"), True)
+    if not enabled:
+        return None
+    if _load_bridge_module is not None:
+        _qsm = _load_bridge_module("bigqmt_signal_trader.quote_subscription_manager")
+    else:
+        from bigqmt_signal_trader import quote_subscription_manager as _qsm
+    import importlib
+
+    _qsm = importlib.reload(_qsm)
+    heartbeat_timeout = float(quote_config.get("heartbeat_timeout_seconds", 30.0))
+    zmq_bind_address = quote_config.get("zmq_bind_address")
+    return _qsm.build_quote_subscription_service(
+        context_info,
+        transport_name=transport_name,
+        account_id=account_id,
+        redis_client=redis_client,
+        zmq_bind_address=zmq_bind_address,
+        enabled=True,
+        heartbeat_timeout_seconds=heartbeat_timeout,
+    )
+
+
 def _build_rpc_service(context_info, app, config):
     rpc_config = dict(config.get("rpc") or {})
     enabled = _config_bool(config.get("enable_rpc"), False) or _config_bool(rpc_config.get("enabled"), False)
@@ -312,6 +344,13 @@ def _build_rpc_service(context_info, app, config):
         print("[bigqmt_rpc] disabled: account_id is empty")
         return None
     allow_order_methods = _config_bool(rpc_config.get("allow_order_methods"), False)
+    global _quote_subscription_service
+    _quote_subscription_service = _build_quote_subscription_service(
+        context_info, config, transport_name, account_id, redis_client
+    )
+    quote_manager = (
+        _quote_subscription_service[0] if _quote_subscription_service is not None else None
+    )
     handlers = BigQmtRpcHandlers(
         account_id=account_id,
         market_data=BigQmtMarketDataProvider(context_info),
@@ -324,6 +363,7 @@ def _build_rpc_service(context_info, app, config):
         allow_order_methods=allow_order_methods,
         allowed_methods=rpc_config.get("allowed_methods"),
         qmt_api=qmt_api,
+        quote_subscription_manager=quote_manager,
     )
     process_in_listener = _config_bool(rpc_config.get("process_in_listener"), True)
     listener_methods = rpc_config.get("listener_methods") or ("*",)
@@ -374,6 +414,13 @@ def _start_rpc_service(context_info, app, config):
     _rpc_service = _build_rpc_service(context_info, app, config)
     if _rpc_service is not None:
         _rpc_service.start()
+        if _quote_subscription_service is not None:
+            try:
+                _quote_subscription_service[1].start_publisher()
+                print("[bigqmt_quote_push] publisher started transport=%s"
+                      % str(dict(config.get("rpc") or {}).get("transport") or "redis"))
+            except Exception as exc:
+                print("[bigqmt_quote_push] publisher start failed: %s" % exc)
     return _rpc_service
 
 
@@ -386,6 +433,11 @@ def _drain_rpc_service(config):
     if hasattr(_rpc_service, "drain_request_queue"):
         processed += _rpc_service.drain_request_queue(max_items=max_items)
     processed += _rpc_service.drain_pending(max_items=max_items)
+    if _quote_subscription_service is not None:
+        try:
+            _quote_subscription_service[0].reap_expired()
+        except Exception as exc:
+            print("[bigqmt_quote_push] reap failed: %s" % exc)
     return processed
 
 
