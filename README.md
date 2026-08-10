@@ -45,6 +45,69 @@
 - `bigqmt_signal_trader.xtquant_compat`：把旧代码的 `xt_trader` / `xtdata` 调用转成 RPC，无需改业务代码。
 - 兼容 MiniQMT 方法名：`query_stock_asset` / `query_stock_positions` / `query_stock_orders` / `get_full_tick` / `order_stock` 等。
 
+### 异步回报回调（MiniQMT 风格，实盘验证）
+
+客户端注册 `XtQuantTraderCallback` 子类，`connect()`/`subscribe()` 后实时接收委托/成交/错误回报（通过 Redis pubsub 推送）：
+
+```python
+from bigqmt_signal_trader.xtquant_compat import (
+    StockAccount, XtQuantTraderCallback, configure, xt_trader,
+)
+
+class MyCallback(XtQuantTraderCallback):
+    def on_stock_order(self, order):
+        print("委托回报:", order.stock_code, order.order_status, order.order_sysid)
+
+    def on_stock_trade(self, trade):
+        print("成交回报:", trade.stock_code, trade.order_id, trade.traded_volume, trade.traded_price)
+
+    def on_order_error(self, order_error):
+        print("委托失败:", order_error.order_id, order_error.error_id, order_error.error_msg)
+
+    def on_cancel_error(self, cancel_error):
+        print("撤单失败:", cancel_error.order_id, cancel_error.error_id, cancel_error.error_msg)
+
+    def on_order_stock_async_response(self, response):
+        print("异步下单回报:", response.account_id, response.order_id, response.seq)
+
+    def on_account_status(self, status):
+        print("账户状态:", status.account_id, status.account_type, status.status)
+
+configure()
+xt_trader.register_callback(MyCallback())
+acc = StockAccount(xt_trader.client.account_id, "STOCK")
+xt_trader.connect()
+xt_trader.subscribe(acc)
+
+# 异步下单（返回 seq，回报走回调）
+seq = xt_trader.order_stock_async(acc, "600654.SH", 23, 100, 11, 2.95, "rpc_test", "备注")
+```
+
+**完整的回调链**（对齐 MiniQMT 原生语义，实盘验证）：
+
+| 回调 | 触发时机 | 已验证 |
+|------|---------|--------|
+| `on_account_status` | `connect()`/`subscribe()` 后 | ✅ |
+| `on_order_stock_async_response(seq, resp)` | 异步下单提交成功 | ✅（实盘）|
+| `on_stock_order(order)` | 委托状态变化（已报 50 / 已成 56 / 废单 57）| ✅（实盘）|
+| `on_stock_trade(trade)` | 成交回报 | ✅ |
+| `on_order_error(err)` | 废单/拒单（服务端检测 status=57 推送）| ✅（实盘）|
+| `on_cancel_error(err)` | 撤单失败 | ✅ |
+| `on_cancel_order_stock_async_response` | 异步撤单回报 | ✅ |
+
+**`*_async` 查询方法**（对齐 MiniQMT 签名，callback 可选）：
+
+```python
+# 方式 1：callback 接收结果（MiniQMT 原生语义，返回 None）
+xt_trader.query_stock_asset_async(acc, lambda asset: print(asset.cash, asset.total_asset))
+xt_trader.query_stock_positions_async(acc, lambda positions: print(len(positions)))
+
+# 方式 2：不传 callback，返回 seq（我们的扩展）
+seq = xt_trader.query_stock_orders_async(acc)
+```
+
+**注意**：QMT 必须运行在**实盘模式**（非模拟/模型交易）才能收到完整回报。模拟模式下委托进 QMT 界面但不在真实委托队列，`query_orders` 查不到、`order_stock` 返回 -1（触发 `on_order_error`）。
+
 ### 可插拔传输层
 
 | 传输 | 同机 p50 | 跨机 | 适用场景 |
@@ -518,11 +581,15 @@ src/bigqmt_signal_trader/
 │   ├── position_bigqmt.py         持仓（get_trade_detail_data）
 │   └── redis_common.py            Redis 连接/编解码
 ├── redis_rpc.py                   RPC 服务（handlers + service + transport 集成）
-├── xtquant_compat.py              客户端兼容层（xt_trader / xtdata）
+├── xtquant_compat.py              客户端兼容层（xt_trader / xtdata + 异步回调）
+├── exec_events.py                 委托/成交/错误事件推送（Redis pubsub）
 ├── full_tick_cache.py             全市场行情快照缓存（可选降载）
 ├── strategy.py 之类               策略骨架、风控、价格引擎等
+bigqmt_no_redis/                   无 redis 版本（QMT 沙箱拒绝 import redis 时用）
+│   ├── zmq_transport.py           自包含 ZMQ transport（内联编码，零 redis 依赖）
+│   └── DRYRUN_no_redis.py         无 redis DRYRUN 入口
 src/xtquant/                       可选 xtquant import shim
-src/bigqmt_signal_trader_strategy.py        策略入口（init/handlebar/adjust）
+src/bigqmt_signal_trader_strategy.py        策略入口（init/handlebar/adjust + 启动诊断）
 src/bigqmt_signal_trader_redis_rpc_runtime.py  Redis RPC runtime 入口
 src/BIGQMT_REDIS_DRYRUN.py                  QMT 编辑器加载入口（GBK）
 src/BIGQMT_ZMQ_BACKTEST.py                  独立 QMT 回测 ZMQ 入口（GBK）
@@ -530,6 +597,7 @@ src/bigqmt_backtest/                        独立历史驱动、模拟撮合、
 tests/bigqmt_signal_trader/        单元测试（无 QMT 环境可跑）
 tests/bigqmt_backtest/             回测、确定性、隔离和 ZMQ 往返测试
 docs/                              详细文档
+test_all_apis.py                   端到端 API 测试（发现生产问题）
 bench_latency.py / bench_transports.py  延迟基准脚本
 ```
 
@@ -541,7 +609,7 @@ bench_latency.py / bench_transports.py  延迟基准脚本
 python -m pytest tests/bigqmt_signal_trader/ -q
 ```
 
-当前覆盖 **77 个用例**（含传输层往返、Redis RPC、客户端兼容、持仓/行情/下单 handlers）。
+当前覆盖 **199 个用例**（含传输层往返、Redis RPC、客户端兼容、持仓/行情/下单 handlers、异步回调、执行事件）。
 
 ### 端到端 API 测试（发现生产问题）
 
