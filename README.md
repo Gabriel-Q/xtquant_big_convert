@@ -15,8 +15,7 @@
 | 类别 | 方法 |
 |------|------|
 | **系统** | `ping` |
-| **行情快照** | `get_ticks` / `get_full_tick`（五档盘口）|
-| **合约/品种** | `get_instrument` / `get_instrument_type` / `get_stock_name` / `get_stock_type` / `get_last_close` / `get_last_volume` / `get_open_date` / `get_contract_expire_date` / `get_contract_multiplier` / `get_float_caps` / `get_total_share` / `get_turn_over_rate` / `get_weight_in_index` / `get_svol` / `get_bvol` / `get_risk_free_rate` / `is_stock_type` / `get_cb_info` |
+| **行情快照** | `get_ticks` / `get_full_tick`（五档盘口）|| **合约/品种** | `get_instrument` / `get_instrument_type` / `get_stock_name` / `get_stock_type` / `get_last_close` / `get_last_volume` / `get_open_date` / `get_contract_expire_date` / `get_contract_multiplier` / `get_float_caps` / `get_total_share` / `get_turn_over_rate` / `get_weight_in_index` / `get_svol` / `get_bvol` / `get_risk_free_rate` / `is_stock_type` / `get_cb_info` |
 | **K线/历史** | `get_market_data` / `get_market_data_ex` / `get_local_data` / `get_close_price` / `get_index_weight` |
 | **L2 行情** | `get_l2_quote` / `get_l2_order` / `get_l2_transaction` / `subscribe_l2thousand`（需 L2 权限）|
 | **板块** | `get_stock_list_in_sector` / `get_sector_list`* / `get_sector_info` / `create_sector` / `add_sector` / `remove_sector` |
@@ -107,6 +106,41 @@ seq = xt_trader.query_stock_orders_async(acc)
 ```
 
 **注意**：QMT 必须运行在**实盘模式**（非模拟/模型交易）才能收到完整回报。模拟模式下委托进 QMT 界面但不在真实委托队列，`query_orders` 查不到、`order_stock` 返回 -1（触发 `on_order_error`）。
+
+### 全推行情订阅（subscribe_whole_quote 真推送）
+
+`subscribe_whole_quote` 是**服务端真推送**——对齐 MiniQMT 全推行情订阅。服务端引用计数管理 `ContextInfo.subscribe_whole_quote` 回调，通过独立 PUB/SUB 通道向客户端**增量推送**行情（不是一次性快照）：
+
+**架构（三通道）**：
+1. **控制面 RPC**——`subscribe_whole_quote` / `unsubscribe_whole_quote` / `quote_keepalive` 方法（复用现有 transport）
+2. **数据面推送**——`QuotePushChannel` 单向 PUB/SUB（redis pub/sub 或 zmq PUB/SUB，按部署 transport 选择；msgpack 编码 + json 兜底）
+3. **Big-QMT 行情源**——`QuoteSubscriptionManager` 按组合键归一化共享（大写/去空格/排序），多客户端共享一个底层订阅
+
+**关键设计**：
+- **组合键去重**：不同客户端订阅相同标的组合，只占一个 big-QMT 订阅
+- **引用计数**：按 `(client_id, sub_id)` 计数，全部退订或 30s keepalive 超时才销毁
+- **客户端心跳**：周期 `quote_keepalive`；检测推送静默（默认 10 轮心跳）自动重放订阅，**服务端重启后自动恢复**
+- **初始快照**：客户端用 `get_full_tick` 预拉快照（big-QMT 回调是增量的）
+
+**用法**：
+
+```python
+from bigqmt_signal_trader.xtquant_compat import configure, xtdata
+
+configure()
+
+# 订阅全推行情（callback 收到增量推送）
+def on_quote(data):
+    for code, tick in data.items():
+        print(code, tick.get("lastPrice"))
+
+seq = xtdata.subscribe_whole_quote(["600000.SH", "000001.SZ"], callback=on_quote)
+
+# 退订
+xtdata.unsubscribe_quote(seq)
+```
+
+**验证**：实盘交易日验证 1/20/50/100 只标的，3s 推送节奏稳定，零丢失零乱序；多客户端共享/退订隔离/同客户端多 sub_id 全过；服务端重启恢复（42s 中断后验证两次）。详见 [docs/SUBSCRIBE_WHOLE_QUOTE_PUSH.md](docs/SUBSCRIBE_WHOLE_QUOTE_PUSH.md) 和 [docs/SUBSCRIBE_WHOLE_QUOTE_LIVE_VERIFICATION.md](docs/SUBSCRIBE_WHOLE_QUOTE_LIVE_VERIFICATION.md)。
 
 ### 可插拔传输层
 
@@ -583,6 +617,9 @@ src/bigqmt_signal_trader/
 ├── redis_rpc.py                   RPC 服务（handlers + service + transport 集成）
 ├── xtquant_compat.py              客户端兼容层（xt_trader / xtdata + 异步回调）
 ├── exec_events.py                 委托/成交/错误事件推送（Redis pubsub）
+├── quote_push_channel.py          全推行情推送通道（redis/zmq PUB/SUB）
+├── quote_subscription_manager.py  服务端全推订阅管理（引用计数 + 组合键去重）
+├── whole_quote_session.py         客户端全推订阅会话（心跳 + 重启恢复）
 ├── full_tick_cache.py             全市场行情快照缓存（可选降载）
 ├── strategy.py 之类               策略骨架、风控、价格引擎等
 bigqmt_no_redis/                   无 redis 版本（QMT 沙箱拒绝 import redis 时用）
@@ -672,6 +709,8 @@ python test_all_apis.py
 
 - [docs/RPC_API_REFERENCE.md](docs/RPC_API_REFERENCE.md) — **全部 RPC 方法参考**（参数、返回值、别名、大 QMT 能力边界）
 - [docs/FORMULA_SERVER_FASTPATH.md](docs/FORMULA_SERVER_FASTPATH.md) — FormulaServer(58600) 直连快速路径：协议、映射表、能力边界与回退行为
+- [docs/SUBSCRIBE_WHOLE_QUOTE_PUSH.md](docs/SUBSCRIBE_WHOLE_QUOTE_PUSH.md) — 全推行情订阅推送机制设计
+- [docs/SUBSCRIBE_WHOLE_QUOTE_LIVE_VERIFICATION.md](docs/SUBSCRIBE_WHOLE_QUOTE_LIVE_VERIFICATION.md) — 全推行情实盘验证报告
 - [docs/BIG_QMT_REDIS_RPC.md](docs/BIG_QMT_REDIS_RPC.md) — Redis RPC 协议与入口脚本详解
 - [docs/RPC_TRANSPORTS.md](docs/RPC_TRANSPORTS.md) — 可插拔传输层完整说明
 - [docs/XTQUANT_COMPAT_REPLACEMENT.md](docs/XTQUANT_COMPAT_REPLACEMENT.md) — 用兼容层替换旧 xtquant 的步骤
