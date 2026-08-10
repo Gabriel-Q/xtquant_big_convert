@@ -88,6 +88,9 @@ class XtQuantTraderCallback:
     def on_order_stock_async_response(self, response):
         pass
 
+    def on_cancel_order_stock_async_response(self, response):
+        pass
+
     def on_account_status(self, status):
         pass
 
@@ -1723,74 +1726,170 @@ class BigQmtXtTrader:
         BigQmtXtTrader._async_seq += 1
         return BigQmtXtTrader._async_seq
 
-    def query_stock_asset_async(self, account):
-        self.query_stock_asset(account)
+    def _async_query(self, sync_call, account, callback, *args, **kwargs):
+        """Shared async query helper.
+
+        MiniQMT's *_async query methods take a callback and hand the result to
+        it (they return None). We accept an OPTIONAL callback for compat: when
+        given, we call callback(result) synchronously (our RPC is already
+        synchronous) and return None like MiniQMT; when omitted, we keep our
+        seq-returning extension so existing callers don't break.
+        """
+        result = sync_call(account, *args, **kwargs)
+        if callback is not None:
+            try:
+                callback(result)
+            except Exception:
+                pass
+            return None
         return self._next_async_seq()
 
-    def query_stock_positions_async(self, account):
-        self.query_stock_positions(account)
+    def query_stock_asset_async(self, account, callback=None):
+        return self._async_query(self.query_stock_asset, account, callback)
+
+    def query_stock_positions_async(self, account, callback=None):
+        return self._async_query(self.query_stock_positions, account, callback)
+
+    def query_stock_orders_async(self, account, cancelable_only=False, callback=None):
+        if callback is not None:
+            result = self.query_stock_orders(account, cancelable_only)
+            try:
+                callback(result)
+            except Exception:
+                pass
+            return None
         return self._next_async_seq()
 
-    def query_stock_orders_async(self, account, cancelable_only=False):
-        self.query_stock_orders(account, cancelable_only)
+    def query_stock_trades_async(self, account, callback=None):
+        return self._async_query(self.query_stock_trades, account, callback)
+
+    def query_account_infos_async(self, account=None, callback=None):
+        if callback is not None:
+            result = self.query_account_infos(account)
+            try:
+                callback(result)
+            except Exception:
+                pass
+            return None
         return self._next_async_seq()
 
-    def query_stock_trades_async(self, account):
-        self.query_stock_trades(account)
+    def query_account_status_async(self, account=None, callback=None):
+        if callback is not None:
+            result = self.query_account_status(account)
+            try:
+                callback(result)
+            except Exception:
+                pass
+            return None
         return self._next_async_seq()
 
-    def query_account_infos_async(self, account=None):
-        self.query_account_infos(account)
+    def query_credit_detail_async(self, account, callback=None):
+        return self._async_query(self.query_credit_detail, account, callback)
+
+    def query_stk_compacts_async(self, account, callback=None):
+        return self._async_query(self.query_stk_compacts, account, callback)
+
+    def query_credit_subjects_async(self, account, callback=None):
+        return self._async_query(self.query_credit_subjects, account, callback)
+
+    def query_credit_slo_code_async(self, account, callback=None):
+        return self._async_query(self.query_credit_slo_code, account, callback)
+
+    def query_credit_assure_async(self, account, callback=None):
+        return self._async_query(self.query_credit_assure, account, callback)
+
+    def query_ipo_data_async(self, account=None, callback=None):
+        if callback is not None:
+            result = self.query_ipo_data(account)
+            try:
+                callback(result)
+            except Exception:
+                pass
+            return None
         return self._next_async_seq()
 
-    def query_account_status_async(self, account=None):
-        self.query_account_status(account)
-        return self._next_async_seq()
+    def query_new_purchase_limit_async(self, account, callback=None):
+        return self._async_query(self.query_new_purchase_limit, account, callback)
 
-    def query_credit_detail_async(self, account):
-        self.query_credit_detail(account)
-        return self._next_async_seq()
-
-    def query_stk_compacts_async(self, account):
-        self.query_stk_compacts(account)
-        return self._next_async_seq()
-
-    def query_credit_subjects_async(self, account):
-        self.query_credit_subjects(account)
-        return self._next_async_seq()
-
-    def query_credit_slo_code_async(self, account):
-        self.query_credit_slo_code(account)
-        return self._next_async_seq()
-
-    def query_credit_assure_async(self, account):
-        self.query_credit_assure(account)
-        return self._next_async_seq()
-
-    def query_ipo_data_async(self, account=None):
-        self.query_ipo_data(account)
-        return self._next_async_seq()
-
-    def query_new_purchase_limit_async(self, account):
-        self.query_new_purchase_limit(account)
-        return self._next_async_seq()
-
-    def query_appointment_info_async(self, account):
-        self.query_appointment_info(account)
-        return self._next_async_seq()
+    def query_appointment_info_async(self, account, callback=None):
+        return self._async_query(self.query_appointment_info, account, callback)
 
     def cancel_order_stock_async(self, account, order_id):
-        return self.cancel_order_stock(account, order_id)
+        # MiniQMT: returns seq, result comes back via on_cancel_order_stock_async_response.
+        seq = self._next_async_seq()
+        try:
+            ok = self.cancel_order_stock(account, order_id)
+        except Exception as exc:
+            callback = self.callback
+            if callback is not None:
+                try:
+                    callback.on_cancel_error(
+                        CompatObject(
+                            error_id=getattr(exc, "errno", 0),
+                            error_msg=str(exc),
+                            order_sys_id=str(order_id or ""),
+                            stock_code="",
+                        )
+                    )
+                except Exception:
+                    pass
+            return seq
+        callback = self.callback
+        if callback is not None:
+            try:
+                callback.on_cancel_order_stock_async_response(
+                    seq,
+                    CompatObject(
+                        success=bool(ok),
+                        order_sys_id=str(order_id or ""),
+                    ),
+                )
+            except Exception:
+                pass
+        return seq
 
     def cancel_order_stock_sysid_async(self, account, market, order_sysid):
-        return self.cancel_order_stock_sysid(account, market, order_sysid)
+        seq = self._next_async_seq()
+        try:
+            ok = self.cancel_order_stock_sysid(account, market, order_sysid)
+        except Exception as exc:
+            callback = self.callback
+            if callback is not None:
+                try:
+                    callback.on_cancel_error(
+                        CompatObject(
+                            error_id=getattr(exc, "errno", 0),
+                            error_msg=str(exc),
+                            order_sys_id=str(order_sysid or ""),
+                            stock_code="",
+                        )
+                    )
+                except Exception:
+                    pass
+            return seq
+        callback = self.callback
+        if callback is not None:
+            try:
+                callback.on_cancel_order_stock_async_response(
+                    seq,
+                    CompatObject(
+                        success=bool(ok),
+                        order_sys_id=str(order_sysid or ""),
+                    ),
+                )
+            except Exception:
+                pass
+        return seq
 
     def set_relaxed_response_order_enabled(self, enabled=True):
         # 内部行为开关，RPC 模式下无意义，no-op。
         return 0
 
-    def smt_appointment_async(self, *args, **kwargs):
-        raise NotImplementedError("smt_appointment is not supported via Big QMT RPC")
+    def smt_appointment_async(self, account, stock_code, apt_days, apt_volume,
+                              fare_ratio, sub_rare_ratio, fine_ratio, begin_date):
+        # SMB/预约打新走独立通道，RPC 桥不支持；返回 -1 表示失败（对齐 MiniQMT
+        # 语义：seq 为 -1 表示委托失败）。
+        return -1
 
     def _order_from_dict(self, account_id, item):
         action = item.get("action")
