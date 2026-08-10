@@ -1292,14 +1292,24 @@ class BigQmtXtTrader:
         self._event_thread.start()
 
     def _event_loop(self):
-        from .exec_events import order_channel, trade_channel
+        from .exec_events import (
+            order_channel,
+            trade_channel,
+            order_error_channel,
+            cancel_error_channel,
+        )
 
         while self._event_running:
             account_id = str(self.client.account_id or "")
             pubsub = None
             try:
                 pubsub = self.client._redis().pubsub(ignore_subscribe_messages=True)
-                pubsub.subscribe(order_channel(account_id), trade_channel(account_id))
+                pubsub.subscribe(
+                    order_channel(account_id),
+                    trade_channel(account_id),
+                    order_error_channel(account_id),
+                    cancel_error_channel(account_id),
+                )
                 while self._event_running:
                     if str(self.client.account_id or "") != account_id:
                         break  # account changed -> reconnect and resubscribe
@@ -1329,10 +1339,31 @@ class BigQmtXtTrader:
             return
         account_id = str(event.get("account_id") or self.client.account_id or "")
         try:
-            if event.get("event_type") == "trade":
+            event_type = event.get("event_type")
+            if event_type == "trade":
                 callback.on_stock_trade(self._trade_from_dict(account_id, event))
-            elif event.get("event_type") == "order":
+            elif event_type == "order":
                 callback.on_stock_order(self._order_from_dict(account_id, event))
+            elif event_type == "order_error":
+                callback.on_order_error(
+                    CompatObject(
+                        error_id=event.get("error_id"),
+                        error_msg=event.get("error_msg") or "",
+                        order_sys_id=event.get("order_sys_id") or "",
+                        order_id=event.get("order_sys_id") or "",
+                        stock_code=event.get("stock_code") or "",
+                    )
+                )
+            elif event_type == "cancel_error":
+                callback.on_cancel_error(
+                    CompatObject(
+                        error_id=event.get("error_id"),
+                        error_msg=event.get("error_msg") or "",
+                        order_sys_id=event.get("order_sys_id") or "",
+                        order_id=event.get("order_sys_id") or "",
+                        stock_code=event.get("stock_code") or "",
+                    )
+                )
         except Exception:
             pass
 
@@ -1547,7 +1578,41 @@ class BigQmtXtTrader:
         ) or {}
 
     def order_stock_async(self, *args, **kwargs):
-        return self.order_stock(*args, **kwargs)
+        # MiniQMT semantics: returns a seq; the result comes back through
+        # on_order_stock_async_response(seq, order_error|None). Our RPC is
+        # synchronous under the hood, so we fire the response callback
+        # immediately with the seq and the submitted order.
+        seq = self._next_async_seq()
+        try:
+            result = self.order_stock(*args, **kwargs)
+        except Exception as exc:
+            callback = self.callback
+            if callback is not None:
+                try:
+                    callback.on_order_error(
+                        CompatObject(
+                            error_id=getattr(exc, "errno", 0),
+                            error_msg=str(exc),
+                            order_sys_id="",
+                            stock_code=str(kwargs.get("stock_code") or (args[1] if len(args) > 1 else "")),
+                        )
+                    )
+                except Exception:
+                    pass
+            return seq
+        callback = self.callback
+        if callback is not None:
+            try:
+                callback.on_order_stock_async_response(
+                    seq,
+                    CompatObject(
+                        order_sys_id=str(result.get("order_sys_id") or result.get("order_sysid") or "") if isinstance(result, dict) else str(result),
+                        order_id=str(result.get("order_sys_id") or result.get("user_order_id") or "") if isinstance(result, dict) else str(result),
+                    ),
+                )
+            except Exception:
+                pass
+        return seq
 
     def order_stock_batch(self, account, orders, batch_id=""):
         account_id = _account_id(account, self.client.account_id)

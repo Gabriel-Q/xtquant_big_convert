@@ -731,6 +731,17 @@ def _publish_exec_event(kind, obj):
             if raw_fields:
                 event["raw_fields"] = raw_fields
             exec_events.publish_order_event(redis_client, account_id, event)
+            # 废单 (status=57 ENTRUST_STATUS_JUNK) 推送 order_error，让客户端
+            # on_order_error 能感知下单被拒。
+            try:
+                status = int(event.get("status") or 0)
+            except (TypeError, ValueError):
+                status = 0
+            if status == 57:
+                err_event = exec_events.normalize_order_error_event(obj, account_id)
+                if raw_fields:
+                    err_event["raw_fields"] = raw_fields
+                exec_events.publish_order_error_event(redis_client, account_id, err_event)
     except Exception as exc:
         print("[bigqmt_exec_events] publish %s failed: %s" % (kind, exc))
 
