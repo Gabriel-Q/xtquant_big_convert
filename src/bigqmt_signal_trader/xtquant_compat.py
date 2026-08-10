@@ -1609,6 +1609,7 @@ class BigQmtXtTrader:
         # synchronous under the hood, so we fire the response callback
         # immediately with the seq and the submitted order.
         seq = self._next_async_seq()
+        stock_code = str(kwargs.get("stock_code") or (args[1] if len(args) > 1 else ""))
         try:
             result = self.order_stock(*args, **kwargs)
         except Exception as exc:
@@ -1621,7 +1622,24 @@ class BigQmtXtTrader:
                             error_msg=str(exc),
                             order_sys_id="",
                             order_id="",
-                            stock_code=str(kwargs.get("stock_code") or (args[1] if len(args) > 1 else "")),
+                            stock_code=stock_code,
+                        )
+                    )
+                except Exception:
+                    pass
+            return seq
+        # MiniQMT: order_stock returns -1 when the order failed to submit.
+        if isinstance(result, int) and result == -1:
+            callback = self.callback
+            if callback is not None:
+                try:
+                    callback.on_order_error(
+                        CompatObject(
+                            error_id=-1,
+                            error_msg="order submit failed (order_stock returned -1)",
+                            order_sys_id="",
+                            order_id="",
+                            stock_code=stock_code,
                         )
                     )
                 except Exception:
@@ -1639,7 +1657,7 @@ class BigQmtXtTrader:
                         seq=seq,
                         order_id=order_sys_id or str(result.get("user_order_id") or "") if isinstance(result, dict) else str(result),
                         order_sys_id=order_sys_id,
-                        stock_code=str(kwargs.get("stock_code") or (args[1] if len(args) > 1 else "")),
+                        stock_code=stock_code,
                     ),
                 )
             except Exception:
