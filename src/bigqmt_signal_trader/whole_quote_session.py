@@ -19,21 +19,29 @@ def _norm_topic(code_list):
 
 
 class WholeQuoteClientSession(object):
-    def __init__(self, rpc_call, push_channel, client_id, heartbeat_interval_seconds=3.0, sub_id_func=None):
+    def __init__(self, rpc_call, push_channel, client_id, heartbeat_interval_seconds=3.0, sub_id_func=None,
+                 push_silence_replay_heartbeats=10):
         """``rpc_call`` is ``client.call``-shaped: fn(method, params) -> dict.
         ``push_channel`` is a QuotePushChannel used purely as a subscriber.
-        ``sub_id_func`` (optional) mints subscription ids; defaults to a counter."""
+        ``sub_id_func`` (optional) mints subscription ids; defaults to a counter.
+        ``push_silence_replay_heartbeats``: after this many heartbeat rounds
+        without any push, replay subscriptions (covers server restarts where
+        keepalive keeps succeeding because the redis request queue buffers
+        during the restart window but the subscription table was reset)."""
         self._rpc = rpc_call
         self._channel = push_channel
         self.client_id = str(client_id or "")
         self._heartbeat_interval = float(heartbeat_interval_seconds)
+        self._push_silence_replay_heartbeats = int(push_silence_replay_heartbeats)
         self._sub_id_func = sub_id_func
         self._seq = 0
         self._lock = threading.RLock()
         self._subscriptions = {}  # sub_id -> {"topic": str, "callback": fn, "codes": [...]}
         self._started = False
         self._subscriber_active = False
+        self._subscribed_topics = frozenset()  # topic set the subscriber covers now
         self._heartbeat_thread = None
+        self._last_push_time = None  # monotonic time of last incoming push
 
     # -- subscription lifecycle ---------------------------------------------
     def subscribe_whole_quote(self, code_list, callback=None):
@@ -101,21 +109,56 @@ class WholeQuoteClientSession(object):
     def _heartbeat_loop(self):
         import time
 
+        consecutive_failures = 0
+        silence_rounds = 0
+        prev_last_push = None
         while True:
             with self._lock:
                 if not self._started:
                     return
                 sub_ids = list(self._subscriptions.keys())
+                last_push = self._last_push_time
+            if not sub_ids:
+                time.sleep(self._heartbeat_interval)
+                continue
+            failures = 0
             for sub_id in sub_ids:
                 try:
                     self._rpc("quote_keepalive", {"client_id": self.client_id, "sub_id": sub_id})
                 except Exception:
-                    pass
+                    failures += 1
+            if failures:
+                consecutive_failures += 1
+            elif consecutive_failures >= 3:
+                # Server is back after a restart window: replay subscriptions so
+                # the restarted server re-creates the big-QMT subscriptions (its
+                # state is gone). Idempotent on the server, so replays are safe.
+                self.replay_subscriptions()
+                consecutive_failures = 0
+            else:
+                consecutive_failures = 0
+            # Push-silence detection: a server restart can survive with keepalive
+            # succeeding (the redis request queue buffers during the restart
+            # window) while the subscription table was reset, so pushes stop.
+            # Replay when no push arrived for several heartbeat rounds (also
+            # covers the case where the very first prime push never arrived).
+            if last_push != prev_last_push:
+                silence_rounds = 0  # a push arrived since the last round
+            else:
+                silence_rounds += 1
+            prev_last_push = last_push
+            if silence_rounds >= self._push_silence_replay_heartbeats:
+                self.replay_subscriptions()
+                silence_rounds = 0
             time.sleep(self._heartbeat_interval)
 
     # -- push routing ------------------------------------------------------------
     def _on_push(self, topic, data):
+        import time
+
+        now = time.monotonic()
         with self._lock:
+            self._last_push_time = now
             callbacks = [
                 entry["callback"]
                 for entry in self._subscriptions.values()
@@ -129,13 +172,30 @@ class WholeQuoteClientSession(object):
 
     def _sync_subscriber_locked(self):
         """(Re)start the push-channel subscriber to cover exactly the active
-        topics. Caller holds the lock. No-op when nothing is subscribed."""
+        topics. Reuses an existing subscriber when the topic set is unchanged;
+        stops it before restarting when the set changed. No-op when nothing is
+        subscribed (and stops the running subscriber in that case)."""
         topics = sorted({entry["topic"] for entry in self._subscriptions.values()})
-        if not topics:
+        active = frozenset(topics)
+        if active == self._subscribed_topics:
             return
-        # Restart with the full active topic set so newly-added topics get covered.
+        if not active:
+            if self._subscriber_active:
+                try:
+                    self._channel.stop()
+                except Exception:
+                    pass
+                self._subscriber_active = False
+            self._subscribed_topics = active
+            return
+        if self._subscriber_active:
+            try:
+                self._channel.stop()
+            except Exception:
+                pass
         self._channel.start_subscriber(topics, self._on_push)
         self._subscriber_active = True
+        self._subscribed_topics = active
 
     def _next_sub_id(self):
         if self._sub_id_func is not None:

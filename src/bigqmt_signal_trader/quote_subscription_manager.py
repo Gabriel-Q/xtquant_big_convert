@@ -75,7 +75,10 @@ class _Combo(object):
         self.codes = codes
         self.handle = handle
         self.topic = topic
-        self.clients = {}  # client_id -> last_seen timestamp
+        # (client_id, sub_id) -> last_seen. Sub-id granularity: one client may
+        # hold several subscriptions to the same combination, and each one keeps
+        # the shared big-QMT subscription alive independently.
+        self.clients = {}  # (client_id, sub_id) -> last_seen timestamp
 
 
 class QuoteSubscriptionManager(object):
@@ -112,20 +115,20 @@ class QuoteSubscriptionManager(object):
                 combo = _Combo(key, codes, handle, key)
                 self._combos[key] = combo
 
-            combo.clients[client_id] = now
+            combo.clients[(client_id, sub_id)] = now
             self._sub_index[(client_id, sub_id)] = key
             return {"combo_key": key, "topic": combo.topic, "push_endpoint": self._push_endpoint}
 
     def unsubscribe(self, client_id, sub_id):
         """Drop (client_id, sub_id); tear the big-QMT subscription down when the
-        last client of the combination leaves. Unknown sub_ids are a no-op."""
+        last subscription of the combination leaves. Unknown sub_ids are a no-op."""
         client_id = str(client_id or "")
         sub_id = str(sub_id or "")
         with self._lock:
             key = self._sub_index.pop((client_id, sub_id), None)
             if key is None:
                 return
-            handle_to_close = self._remove_client_locked(key, client_id)
+            handle_to_close = self._remove_subscription_locked(key, client_id, sub_id)
         self._close_source(handle_to_close)
 
     def keepalive(self, client_id, sub_id):
@@ -138,12 +141,12 @@ class QuoteSubscriptionManager(object):
             combo = self._combos.get(key)
             if combo is None:
                 return
-            combo.clients[client_id] = self._now()
+            combo.clients[(client_id, str(sub_id or ""))] = self._now()
 
     # -- reaper ---------------------------------------------------------------
     def reap_expired(self, now=None):
-        """Remove clients silent for longer than the keepalive timeout; tear down
-        combos that end up empty. Returns the number of clients reaped."""
+        """Remove subscriptions silent for longer than the keepalive timeout;
+        tear down combos that end up empty. Returns the number reaped."""
         now = self._now() if now is None else now
         reaped = 0
         handles_to_close = []
@@ -152,10 +155,10 @@ class QuoteSubscriptionManager(object):
                 combo = self._combos.get(key)
                 if combo is None:
                     continue
-                for client_id, last_seen in list(combo.clients.items()):
+                for (client_id, sub_id), last_seen in list(combo.clients.items()):
                     if now - last_seen > self._heartbeat_timeout:
-                        self._drop_subscriptions_for_locked(key, client_id)
-                        handle = self._remove_client_locked(key, client_id)
+                        self._sub_index.pop((client_id, sub_id), None)
+                        handle = self._remove_subscription_locked(key, client_id, sub_id)
                         if handle is not None:
                             handles_to_close.append(handle)
                         reaped += 1
@@ -180,19 +183,15 @@ class QuoteSubscriptionManager(object):
 
         return on_push
 
-    def _drop_subscriptions_for_locked(self, key, client_id):
-        for (cid, sub_id), ckey in list(self._sub_index.items()):
-            if ckey == key and cid == client_id:
-                self._sub_index.pop((cid, sub_id), None)
-
-    def _remove_client_locked(self, key, client_id):
-        """Remove client_id from a combo. If the combo became empty, detach it and
-        return its source handle for the caller to close OUTSIDE the lock; else
-        return None. Caller must hold the lock."""
+    def _remove_subscription_locked(self, key, client_id, sub_id):
+        """Remove one (client_id, sub_id) from a combo. If the combo has no
+        subscriptions left, detach it and return its source handle for the
+        caller to close OUTSIDE the lock; else return None. Caller must hold
+        the lock."""
         combo = self._combos.get(key)
-        if combo is None or client_id not in combo.clients:
+        if combo is None:
             return None
-        del combo.clients[client_id]
+        combo.clients.pop((client_id, sub_id), None)
         if combo.clients:
             return None
         self._combos.pop(key, None)

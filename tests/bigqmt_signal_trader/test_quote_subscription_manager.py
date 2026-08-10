@@ -153,6 +153,22 @@ class QuoteSubscriptionManagerTest(unittest.TestCase):
         self.assertEqual(len(self.source.subscriptions), 1)
         self.assertEqual(self.source.unsubscribed, [])
 
+    def test_unsubscribe_one_sub_of_same_client_keeps_combo_alive(self):
+        """同一 client 两个 sub_id 订阅同一组合,退订一个后另一个仍在:
+        服务端引用按 (client_id, sub_id) 粒度,不按 client 粒度。"""
+        self.manager.subscribe("clientA", "sub1", ["SH", "SZ"])
+        self.manager.subscribe("clientA", "sub2", ["SH", "SZ"])
+        self.manager.unsubscribe("clientA", "sub1")
+        self.assertEqual(len(self.source.subscriptions), 1, "组合不应被拆掉")
+        self.assertEqual(self.source.unsubscribed, [], "不应退订大 QMT 订阅")
+        # 另一个 sub 还在:keepalive 应仍有效(不产生新订阅/退订)
+        self.manager.keepalive("clientA", "sub2")
+        self.assertEqual(len(self.source.subscriptions), 1)
+        # 最后一个 sub 退订 -> 组合拆掉
+        self.manager.unsubscribe("clientA", "sub2")
+        self.assertEqual(len(self.source.subscriptions), 0)
+        self.assertEqual(len(self.source.unsubscribed), 1)
+
     def test_unsubscribe_last_client_unsubscribes_qmt(self):
         self.manager.subscribe("clientA", "sub1", ["SH", "SZ"])
         self.manager.subscribe("clientB", "sub2", ["SH", "SZ"])

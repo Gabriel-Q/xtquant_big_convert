@@ -36,13 +36,24 @@ def encode_push_payload(payload):
 
 
 def decode_push_payload(blob):
-    """Inverse of :func:`encode_push_payload`. Accepts bytes or str."""
+    """Inverse of :func:`encode_push_payload`. Accepts bytes or str.
+
+    Encoding is not symmetric across deployments: a server without msgpack
+    falls back to json while a client with msgpack installed decodes with
+    msgpack — ``msgpack.unpackb`` then raises ``ExtraData`` on the json text
+    (its first byte ``{`` parses as an int, leaving trailing bytes). So try
+    msgpack first, and fall back to json when the bytes are not a single
+    valid msgpack object.
+    """
     if blob is None:
         return None
     if isinstance(blob, str):
         blob = blob.encode("utf-8")
     if _HAS_MSGPACK:
-        return msgpack.unpackb(blob, raw=False)
+        try:
+            return msgpack.unpackb(blob, raw=False)
+        except Exception:
+            pass
     return json.loads(blob.decode("utf-8"))
 
 

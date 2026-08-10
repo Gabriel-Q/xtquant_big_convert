@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import threading
@@ -9,11 +10,18 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
 from bigqmt_signal_trader.quote_push_channel import (
+    _HAS_MSGPACK,
     RedisQuotePushChannel,
     ZmqQuotePushChannel,
     decode_push_payload,
     encode_push_payload,
 )
+
+
+def _msgpack_packb(payload):
+    import msgpack
+
+    return msgpack.packb(payload, use_bin_type=True)
 
 
 class FakePubSub:
@@ -61,6 +69,26 @@ class PayloadCodecTest(unittest.TestCase):
         # Wire encoding must be bytes (msgpack or utf-8 json), not str.
         blob = encode_push_payload({"a": 1})
         self.assertIsInstance(blob, (bytes, bytearray))
+
+    def test_decode_json_wire_with_msgpack_available(self):
+        # 服务端未装 msgpack 时用 json 兜底编码;若客户端装了 msgpack,
+        # msgpack.unpackb 会把 json 文本首字节 '{'(0x7B) 当整数解析并抛
+        # ExtraData("unpack(b) received extra data")——真实联调中触发。
+        # decode 必须识别并回退到 json。
+        payload = {"combo_key": "000001.SZ", "data": {"000001.SZ": {"lastPrice": 11.19}}}
+        wire = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+        self.assertIsInstance(wire, bytes)
+        self.assertEqual(decode_push_payload(wire), payload)
+
+    def test_decode_msgpack_wire_without_msgpack_available(self):
+        # 反向:服务端装了 msgpack、客户端未装(仅 json 可用)。msgpack 字节流
+        # 通常不是合法 utf-8,json 解码会失败——此时应显式尝试 msgpack 解码,
+        # 而不是吞掉异常返回 None。
+        payload = {"combo_key": "SH,SZ", "data": {"600000.SH": {"lastPrice": 9.9}}}
+        if not _HAS_MSGPACK:
+            self.skipTest("msgpack not installed on this client")
+        wire = _msgpack_packb(payload)
+        self.assertEqual(decode_push_payload(wire), payload)
 
 
 class ZmqPushChannelTest(unittest.TestCase):

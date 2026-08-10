@@ -31,6 +31,28 @@ class FakeRpc:
             return [m for m, _ in self.calls]
 
 
+class FakeRpcWithRestart(FakeRpc):
+    """Simulates a server restart: keepalive fails for a window of calls,
+    then the server is back (subscribe succeeds again)."""
+
+    def __init__(self, fail_start=0, fail_count=3):
+        super().__init__()
+        self.fail_start = fail_start
+        self.fail_count = fail_count
+
+    def __call__(self, method, params):
+        with self._lock:
+            self.calls.append((method, dict(params)))
+            if method == "quote_keepalive":
+                n = sum(1 for m, _ in self.calls if m == "quote_keepalive") - 1  # 本次
+        if method == "quote_keepalive" and self.fail_start <= n < self.fail_start + self.fail_count:
+            raise RuntimeError("server restarting")
+        if method == "subscribe_whole_quote":
+            codes = sorted(str(c).upper() for c in params.get("codes") or [])
+            return {"combo_key": ",".join(codes), "topic": ",".join(codes)}
+        return {}
+
+
 class FakePushChannel:
     """Client-side push channel stand-in: lets tests inject server pushes."""
 
@@ -51,6 +73,23 @@ class FakePushChannel:
 
     def stop(self):
         self.stopped = True
+
+
+class FakePushChannelWithTopics(FakePushChannel):
+    """Like FakePushChannel but tracks the currently subscribed topic set, so
+    the session can diff and reuse an existing subscriber."""
+
+    def __init__(self):
+        super().__init__()
+        self.active_topics = frozenset()
+
+    def start_subscriber(self, topics, on_msg):
+        super().start_subscriber(topics, on_msg)
+        self.active_topics = frozenset(topics)
+
+    def stop(self):
+        super().stop()
+        self.active_topics = frozenset()
 
 
 class WholeQuoteSessionTest(unittest.TestCase):
@@ -139,6 +178,106 @@ class WholeQuoteSessionTest(unittest.TestCase):
         session.subscribe_whole_quote(["SH"], callback=lambda d: None)
         sub_params = [p for m, p in rpc.calls if m == "subscribe_whole_quote"][0]
         self.assertEqual(sub_params["client_id"], "client-test")
+
+    def test_auto_replay_after_server_restart(self):
+        """服务端重启后, 心跳线程应检测到 keepalive 失败并在服务端恢复后
+        自动重放订阅(否则推送永久中断)。"""
+        rpc = FakeRpcWithRestart(fail_start=1, fail_count=3)  # 第1-3次keepalive失败
+        channel = FakePushChannelWithTopics()
+        session = WholeQuoteClientSession(
+            rpc_call=rpc, push_channel=channel, client_id="client-test",
+            heartbeat_interval_seconds=0.05,
+        )
+        session.subscribe_whole_quote(["SH"], callback=lambda d: None)
+        session.start()
+        try:
+            deadline = time.time() + 2.0
+            # 等待: keepalive 失败触发重放, 重放后又有新的 keepalive
+            while time.time() < deadline:
+                if rpc.methods().count("subscribe_whole_quote") >= 2 and \
+                   rpc.methods().count("quote_keepalive") >= 5:
+                    break
+                time.sleep(0.02)
+            subs = rpc.methods().count("subscribe_whole_quote")
+            kps = rpc.methods().count("quote_keepalive")
+            print("auto-replay: subscribe=%d keepalive=%d" % (subs, kps))
+            self.assertGreaterEqual(subs, 2, "服务端恢复后应重放订阅")
+            self.assertGreaterEqual(kps, 5)
+        finally:
+            session.stop()
+
+    def test_no_replay_when_server_healthy(self):
+        """服务端健康时不应反复重放订阅(只保留初始 subscribe)。"""
+        session, rpc, _channel = self._session(heartbeat_interval_seconds=0.05)
+        session.subscribe_whole_quote(["SH"], callback=lambda d: None)
+        session.start()
+        try:
+            time.sleep(0.4)
+            self.assertEqual(rpc.methods().count("subscribe_whole_quote"), 1)
+        finally:
+            session.stop()
+
+    def test_replay_when_push_silent_after_restart(self):
+        """服务端重启后 keepalive 可能不失败(redis 队列兜住),但推送会静默。
+        客户端应在推送静默超过阈值后自动重放订阅。"""
+        rpc = FakeRpc()  # keepalive 从不失败
+        channel = FakePushChannelWithTopics()
+        session = WholeQuoteClientSession(
+            rpc_call=rpc, push_channel=channel, client_id="client-test",
+            heartbeat_interval_seconds=0.05,
+            push_silence_replay_heartbeats=2,  # 2 个心跳周期无推送即重放
+        )
+        session.subscribe_whole_quote(["SH"], callback=lambda d: None)
+        session.start()
+        try:
+            deadline = time.time() + 1.5
+            while time.time() < deadline:
+                if rpc.methods().count("subscribe_whole_quote") >= 2:
+                    break
+                time.sleep(0.02)
+            self.assertGreaterEqual(
+                rpc.methods().count("subscribe_whole_quote"), 2,
+                "推送静默超阈值应自动重放订阅",
+            )
+        finally:
+            session.stop()
+
+    def test_subscriber_reused_when_topic_set_unchanged(self):
+        """订阅/退订不应为同一 topic 集合反复重建订阅线程(线程泄漏)。"""
+        rpc = FakeRpc()
+        channel = FakePushChannelWithTopics()
+        session = WholeQuoteClientSession(
+            rpc_call=rpc, push_channel=channel, client_id="client-test",
+            heartbeat_interval_seconds=0.05,
+        )
+        sub1 = session.subscribe_whole_quote(["SH"], callback=lambda d: None)
+        sub2 = session.subscribe_whole_quote(["SH"], callback=lambda d: None)
+        # 两次同 topic 订阅:共享订阅线程,只 start 一次
+        self.assertEqual(len(channel.subscriptions), 1)
+        # 退订一个 sub_id:topic 集合不变,不应重启线程
+        session.unsubscribe_quote(sub1)
+        self.assertEqual(len(channel.subscriptions), 1)
+        self.assertFalse(channel.stopped)
+        # 退订最后一个 sub_id:topic 集合变空,应停掉线程
+        session.unsubscribe_quote(sub2)
+        self.assertTrue(channel.stopped)
+        self.assertEqual(len(channel.subscriptions), 1)
+
+    def test_subscriber_restarts_when_topic_set_changes(self):
+        """topic 集合变化时重建订阅线程,但旧线程先 stop。"""
+        rpc = FakeRpc()
+        channel = FakePushChannelWithTopics()
+        session = WholeQuoteClientSession(
+            rpc_call=rpc, push_channel=channel, client_id="client-test",
+            heartbeat_interval_seconds=0.05,
+        )
+        session.subscribe_whole_quote(["SH"], callback=lambda d: None)
+        session.subscribe_whole_quote(["SZ"], callback=lambda d: None)
+        # topic 集合从 {SH} 变成 {SH,SZ} -> 重建(但旧 stop)
+        self.assertEqual(len(channel.subscriptions), 2)
+        self.assertTrue(channel.stopped)
+        # 新线程订阅 {SH,SZ}
+        self.assertEqual(channel.active_topics, frozenset(["SH", "SZ"]))
 
 
 if __name__ == "__main__":
