@@ -43,6 +43,18 @@
 
 - `bigqmt_signal_trader.xtquant_compat`：把旧代码的 `xt_trader` / `xtdata` 调用转成 RPC，无需改业务代码。
 - 兼容 MiniQMT 方法名：`query_stock_asset` / `query_stock_positions` / `query_stock_orders` / `get_full_tick` / `order_stock` 等。
+- **完整 xtconstant 枚举**（91 个常量，对齐原生 MiniQMT）：账号类型、委托类型（股票/期货/信用/期权）、报价类型、委托状态、账号状态、`ORDER_TYPE_SET`。
+
+```python
+# 旧代码零改动（自动命中 shim）
+from xtquant.xtconstant import STOCK_BUY, FIX_PRICE, ORDER_SUCCEEDED
+
+# 或直接从 compat 导入
+from bigqmt_signal_trader.xtquant_compat import (
+    SECURITY_ACCOUNT, STOCK_BUY, FIX_PRICE, CREDIT_FIN_BUY,
+    FUTURE_OPEN, ACCOUNT_STATUS_OK, ORDER_SUCCEEDED,
+)
+```
 
 ### 异步回报回调（MiniQMT 风格，实盘验证）
 
