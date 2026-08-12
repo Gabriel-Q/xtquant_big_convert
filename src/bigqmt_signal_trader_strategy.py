@@ -798,24 +798,16 @@ def _publish_exec_event(kind, obj):
         print("[bigqmt_exec_events] publish %s failed: %s" % (kind, exc))
 
 
-def on_order(ContextInfo, order):
-    _publish_exec_event("order", order)
-    return forward_order_event(BigQmtRuntimeAdapter.to_order_event(order))
-
-
-def on_trade(ContextInfo, trade):
-    _publish_exec_event("trade", trade)
-    return forward_trade_event(BigQmtRuntimeAdapter.to_trade_event(trade))
-
-
 def order_callback(ContextInfo, orderInfo):
     """Standard Big QMT order callback."""
-    return on_order(ContextInfo, orderInfo)
+    _publish_exec_event("order", orderInfo)
+    return forward_order_event(BigQmtRuntimeAdapter.to_order_event(orderInfo))
 
 
 def deal_callback(ContextInfo, dealInfo):
     """Standard Big QMT deal callback."""
-    return on_trade(ContextInfo, dealInfo)
+    _publish_exec_event("trade", dealInfo)
+    return forward_trade_event(BigQmtRuntimeAdapter.to_trade_event(dealInfo))
 
 
 def sync_positions(ContextInfo):
