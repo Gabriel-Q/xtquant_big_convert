@@ -18,9 +18,17 @@ from .local_cache import LocalMarketCache
 from .redis_rpc import call_redis_rpc
 
 
-# Default OHLCV fields pulled + cached by download_history_data*.
+# Default OHLCV fields pulled + cached by get_local_data fallback_rpc.
 DEFAULT_DOWNLOAD_FIELDS = ["open", "high", "low", "close", "volume", "amount"]
 _TIME_COL_NAMES = ("stime", "time", "index", "date", "datetime", "timetag")
+
+
+def _as_list(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return list(value)
 
 
 STOCK_BUY = 23
@@ -492,9 +500,8 @@ class BigQmtRpcClient:
                 or _env_float("BIGQMT_FULL_TICK_POLL_INTERVAL_SECONDS", 0.2)
             ),
         }
-        # Client-side local market-data cache. download_history_data* pulls bars
-        # over RPC once and persists them here; get_local_data then reads them with
-        # no RPC. fallback_rpc=True lets get_local_data fetch+cache a cache miss.
+        # Client-side local market-data cache. get_market_data_ex is cache-through;
+        # fallback_rpc=True lets get_local_data fetch+cache a cache miss.
         local_cache_config = dict(client_config.get("local_cache_config") or {})
         self.local_cache_config = {
             "enabled": _bool_value(
@@ -779,8 +786,8 @@ class BigQmtXtData:
     ):
         return self._call(
             "get_market_data",
-            field_list=list(field_list or []),
-            stock_list=list(stock_list or []),
+            field_list=_as_list(field_list),
+            stock_list=_as_list(stock_list),
             period=period,
             start_time=start_time,
             end_time=end_time,
@@ -805,8 +812,8 @@ class BigQmtXtData:
         # for 前复权 (front-adjusted) data, whose history re-scales on each dividend.
         data = self._call(
             "get_market_data_ex",
-            field_list=list(field_list or []),
-            stock_list=list(stock_list or []),
+            field_list=_as_list(field_list),
+            stock_list=_as_list(stock_list),
             period=period,
             start_time=start_time,
             end_time=end_time,
@@ -837,9 +844,8 @@ class BigQmtXtData:
     ):
         """Read bars from the CLIENT-side local cache — no RPC to Big QMT.
 
-        Populate the cache first with download_history_data2(...). Returns a dict
-        {code: DataFrame}. A cache-missed code is omitted, unless
-        local_cache_fallback_rpc is enabled (then it is fetched + cached).
+        Returns a dict {code: DataFrame}. A cache-missed code is omitted, unless
+        local_cache_fallback_rpc is enabled (then it is fetched + cached over RPC).
         """
         codes = [str(c) for c in (stock_list or []) if str(c or "").strip()]
         cache = self._local_cache()
@@ -847,7 +853,7 @@ class BigQmtXtData:
             # Cache disabled -> behave like a plain RPC local-data read.
             return self._call(
                 "get_local_data",
-                field_list=list(field_list or []),
+                field_list=_as_list(field_list),
                 stock_list=codes,
                 period=period,
                 start_time=start_time,
@@ -1011,45 +1017,100 @@ class BigQmtXtData:
     def get_divid_factors(self, stock_code, start_time="", end_time=""):
         return self._call("get_divid_factors", stock_code=stock_code, start_time=start_time, end_time=end_time)
 
-    def download_history_data2(self, stock_list, period, start_time="", end_time="", callback=None, incrementally=None, dividend_type="none", chunk_size=None):
-        """Pull bars from Big QMT over RPC and cache them locally, in batches.
-
-        Mirrors xtdata.download_history_data2: after this, get_local_data(..., the
-        same dividend_type) reads the data locally with no further RPC. Each batch
-        re-pulls live, so re-running keeps the cache latest — needed for 前复权
-        (front-adjusted) data. ``callback`` (optional) is invoked once per stock with
-        {finished, total, stockcode} — xtdata-style. Returns {finished, total}.
-        """
+    def submit_download_history_data2(
+        self,
+        stock_list,
+        period,
+        start_time="",
+        end_time="",
+        incrementally=None,
+        chunk_size=None,
+        job_ttl_seconds=3600,
+    ):
+        """Submit a server-side Big QMT history download job and return its status."""
         codes = [str(c) for c in (stock_list or []) if str(c or "").strip()]
         if not codes:
-            return {"finished": 0, "total": 0}
-        if self._local_cache() is None:
-            raise RuntimeError("local cache is disabled (set local_cache_enabled=True to download)")
-        total = len(codes)
-        step = int(chunk_size or 300)
-        if step <= 0:
-            step = 300
-        finished = 0
-        for i in range(0, total, step):
-            batch = codes[i:i + step]
-            # get_market_data_ex is cache-through: it writes each code to the cache.
-            self.get_market_data_ex(
-                field_list=DEFAULT_DOWNLOAD_FIELDS,
-                stock_list=batch,
-                period=period,
-                start_time=start_time,
-                end_time=end_time,
-                count=-1,
-                dividend_type=dividend_type,
-            )
-            for code in batch:
-                finished += 1
-                if callback is not None:
-                    try:
-                        callback({"finished": finished, "total": total, "stockcode": code})
-                    except Exception:
-                        pass
-        return {"finished": finished, "total": total}
+            return {"job_id": "", "state": "done", "done": 0, "total": 0, "error": ""}
+        return self._call(
+            "submit_download_history_data2",
+            stock_list=codes,
+            period=period,
+            start_time=start_time,
+            end_time=end_time,
+            incrementally=incrementally,
+            chunk_size=chunk_size,
+            job_ttl_seconds=job_ttl_seconds,
+        )
+
+    def submit_download_history_data(
+        self,
+        stock_code,
+        period,
+        start_time="",
+        end_time="",
+        incrementally=None,
+        chunk_size=None,
+        job_ttl_seconds=3600,
+    ):
+        return self.submit_download_history_data2(
+            [stock_code],
+            period,
+            start_time,
+            end_time,
+            incrementally=incrementally,
+            chunk_size=chunk_size,
+            job_ttl_seconds=job_ttl_seconds,
+        )
+
+    def get_download_status(self, job_id):
+        return self._call("get_download_status", job_id=job_id)
+
+    def wait_download(self, job_id, timeout=1800, poll_interval=0.5, callback=None):
+        deadline = time.time() + max(0.0, float(timeout))
+        last_done = None
+        while True:
+            status = self.get_download_status(job_id)
+            done = status.get("done") if isinstance(status, dict) else None
+            total = status.get("total") if isinstance(status, dict) else None
+            if callback is not None and done != last_done:
+                last_done = done
+                try:
+                    callback({"finished": done, "total": total, "job_id": job_id})
+                except Exception:
+                    pass
+            if status and status.get("state") in ("done", "failed"):
+                if status.get("state") == "failed":
+                    raise RuntimeError(status.get("error") or "download job failed")
+                return status
+            if time.time() >= deadline:
+                raise TimeoutError("download job timed out: %s" % job_id)
+            time.sleep(max(0.05, float(poll_interval)))
+
+    def download_history_data2(
+        self,
+        stock_list,
+        period,
+        start_time="",
+        end_time="",
+        callback=None,
+        incrementally=None,
+        dividend_type="none",
+        chunk_size=None,
+        timeout=1800,
+    ):
+        """Submit a server-side Big QMT download job and wait for completion."""
+        job = self.submit_download_history_data2(
+            stock_list,
+            period,
+            start_time,
+            end_time,
+            incrementally=incrementally,
+            chunk_size=chunk_size,
+        )
+        job_id = job.get("job_id") if isinstance(job, dict) else ""
+        if not job_id:
+            return job
+        return self.wait_download(job_id, timeout=timeout, callback=callback)
 
     def download_history_data(self, stock_code, period, start_time="", end_time="", incrementally=None, dividend_type="none"):
         return self.download_history_data2([stock_code], period, start_time, end_time, dividend_type=dividend_type)
@@ -1796,20 +1857,26 @@ class BigQmtXtTrader:
         price, strategy_name, order_remark,
     ):
         account_id = _account_id(account, self.client.account_id)
-        return self.client.call(
-            "order_stock",
-            {
-                "account_id": account_id,
-                "stock_code": stock_code,
-                "order_type": order_type,
-                "order_volume": order_volume,
-                "price_type": price_type,
-                "price": price,
-                "strategy_name": strategy_name,
-                "order_remark": order_remark,
-            },
-            account_id=account_id,
-        ) or {}
+        user_order_id = str(order_remark or "").strip()
+        if not user_order_id:
+            user_order_id = "bqrpc:%s:%s" % (int(time.time() * 1000), uuid.uuid4().hex[:10])
+        payload = {
+            "account_id": account_id,
+            "stock_code": stock_code,
+            "order_type": order_type,
+            "order_volume": order_volume,
+            "price_type": price_type,
+            "price": price,
+            "strategy_name": strategy_name,
+            "order_remark": user_order_id,
+        }
+        try:
+            return self.client.call("order_stock", payload, account_id=account_id) or {}
+        except TimeoutError as exc:
+            raise TimeoutError(
+                "order_stock rpc timeout; user_order_id=%s. Query orders/trades before retrying to avoid duplicate orders. %s"
+                % (user_order_id, exc)
+            )
 
     def order_stock_async(self, *args, **kwargs):
         # MiniQMT semantics: returns a seq; the result comes back through
