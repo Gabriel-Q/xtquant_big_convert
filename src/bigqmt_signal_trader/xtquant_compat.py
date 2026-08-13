@@ -316,6 +316,12 @@ def load_client_config(module_name=None):
         timeout_seconds = getattr(module, "BIGQMT_RPC_TIMEOUT_SECONDS", None)
         if timeout_seconds is None:
             timeout_seconds = redis_config.get("rpc_timeout_seconds")
+        download_wait_seconds = getattr(module, "BIGQMT_DOWNLOAD_WAIT_SECONDS", None)
+        if download_wait_seconds is None:
+            download_wait_seconds = redis_config.get("download_wait_seconds")
+        download_poll_interval_seconds = getattr(module, "BIGQMT_DOWNLOAD_POLL_INTERVAL_SECONDS", None)
+        if download_poll_interval_seconds is None:
+            download_poll_interval_seconds = redis_config.get("download_poll_interval_seconds")
         full_tick_cache_config = dict(getattr(module, "BIGQMT_FULL_TICK_CACHE_CONFIG", {}) or {})
         for key in (
             "full_tick_cache_enabled",
@@ -337,6 +343,8 @@ def load_client_config(module_name=None):
             "account_id": account_id,
             "redis_config": redis_config,
             "timeout_seconds": timeout_seconds,
+            "download_wait_seconds": download_wait_seconds,
+            "download_poll_interval_seconds": download_poll_interval_seconds,
             "full_tick_cache_config": full_tick_cache_config,
             "local_cache_config": local_cache_config,
             "formula_server_config": formula_server_config,
@@ -472,6 +480,18 @@ class BigQmtRpcClient:
             else config_timeout
             if config_timeout is not None
             else _env_float("BIGQMT_RPC_TIMEOUT_SECONDS", 6.0)
+        )
+        config_download_wait = client_config.get("download_wait_seconds")
+        self.download_wait_seconds = float(
+            config_download_wait
+            if config_download_wait is not None
+            else _env_float("BIGQMT_DOWNLOAD_WAIT_SECONDS", 1800.0)
+        )
+        config_download_poll = client_config.get("download_poll_interval_seconds")
+        self.download_poll_interval_seconds = float(
+            config_download_poll
+            if config_download_poll is not None
+            else _env_float("BIGQMT_DOWNLOAD_POLL_INTERVAL_SECONDS", 0.5)
         )
         full_tick_cache_config = dict(client_config.get("full_tick_cache_config") or {})
         self.full_tick_cache_config = {
@@ -1065,7 +1085,11 @@ class BigQmtXtData:
     def get_download_status(self, job_id):
         return self._call("get_download_status", job_id=job_id)
 
-    def wait_download(self, job_id, timeout=1800, poll_interval=0.5, callback=None):
+    def wait_download(self, job_id, timeout=None, poll_interval=None, callback=None):
+        if timeout is None:
+            timeout = getattr(self.client, "download_wait_seconds", 1800.0)
+        if poll_interval is None:
+            poll_interval = getattr(self.client, "download_poll_interval_seconds", 0.5)
         deadline = time.time() + max(0.0, float(timeout))
         last_done = None
         while True:
@@ -1096,7 +1120,7 @@ class BigQmtXtData:
         incrementally=None,
         dividend_type="none",
         chunk_size=None,
-        timeout=1800,
+        timeout=None,
     ):
         """Submit a server-side Big QMT download job and wait for completion."""
         job = self.submit_download_history_data2(

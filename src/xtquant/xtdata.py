@@ -85,7 +85,7 @@ def get_download_status(job_id):
     return _compat.xtdata.get_download_status(job_id)
 
 
-def wait_download(job_id, timeout=1800, poll_interval=0.5, callback=None):
+def wait_download(job_id, timeout=None, poll_interval=None, callback=None):
     return _compat.xtdata.wait_download(job_id, timeout, poll_interval, callback)
 
 

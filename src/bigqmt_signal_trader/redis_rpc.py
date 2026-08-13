@@ -292,6 +292,13 @@ def _maybe_scalar(value):
     return value
 
 
+def _is_redis_timeout(exc):
+    name = exc.__class__.__name__.lower()
+    module = getattr(exc.__class__, "__module__", "")
+    text = str(exc).lower()
+    return ("redis" in module and "timeout" in name) or "timeout reading from socket" in text
+
+
 def to_jsonable(value):
     value = _maybe_scalar(value)
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -1386,19 +1393,34 @@ def call_redis_rpc(
     if str(transport or "queue").lower() in ("queue", "list", "blpop"):
         redis_client.rpush(request_queue, payload)
         redis_client.expire(request_queue, max(60, int(ttl_seconds)))
-        wait_timeout = max(1, int(float(timeout_seconds) + 0.999))
-        item = redis_client.blpop(response_list, timeout=wait_timeout)
-        if item:
-            raw_response = item[1] if isinstance(item, (list, tuple)) and len(item) >= 2 else item
+        deadline = time.time() + float(timeout_seconds)
+        while True:
+            raw_response = redis_client.get(response_key)
+            if raw_response:
+                return json.loads(decode_text(raw_response))
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            wait_timeout = max(1, int(min(remaining, 1.0) + 0.999))
             try:
-                redis_client.delete(response_list)
-            except Exception:
-                pass
-            return json.loads(decode_text(raw_response))
+                item = redis_client.blpop(response_list, timeout=wait_timeout)
+            except Exception as exc:
+                if _is_redis_timeout(exc):
+                    continue
+                raise
+            if item:
+                raw_response = item[1] if isinstance(item, (list, tuple)) and len(item) >= 2 else item
+                try:
+                    redis_client.delete(response_list)
+                except Exception:
+                    pass
+                return json.loads(decode_text(raw_response))
         raw_response = redis_client.get(response_key)
         if raw_response:
             return json.loads(decode_text(raw_response))
-        raise TimeoutError("redis rpc timeout: %s" % method)
+        raise TimeoutError(
+            "redis rpc timeout: %s account_id=%s request_queue=%s" % (method, account_id, request_queue)
+        )
 
     pubsub = redis_client.pubsub(ignore_subscribe_messages=True)
     try:
