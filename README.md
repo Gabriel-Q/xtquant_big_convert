@@ -790,6 +790,42 @@ python test_all_apis.py
 
 ---
 
+## 日志与排错（出错去哪看）
+
+系统自带**文件日志**——所有报错/异常同时写 QMT 输出面板和本地日志文件，重启/崩溃后也能回溯。
+
+### 日志位置
+
+| 环境 | 日志文件 |
+|------|---------|
+| **QMT 内（服务端）** | `<QMT python 目录>\logs\bigqmt.log`（如 `D:\国金证券QMT交易端_lemo\python\logs\bigqmt.log`）|
+| **外部客户端** | `~\.cache\bigqmt\logs\bigqmt.log`（用户目录下）|
+
+- **按天轮转**（午夜），**默认保留最近 7 天**。
+- 每行带时间戳 + 级别 + 模块标签：`2026-08-14 21:45:59 [ERROR] [bigqmt.quote_push] publisher start failed: ...`
+
+### 查看方式
+
+```powershell
+# 实时跟踪日志
+Get-Content "D:\国金证券QMT交易端\lempython\logs\bigqmt.log" -Wait -Tail 50
+
+# 只看错误
+Get-Content "D:\...\python\logs\bigqmt.log" | Select-String "ERROR|WARN"
+```
+
+### 配置
+
+| 环境变量 | 默认 | 说明 |
+|---------|------|------|
+| `BIGQMT_LOG_ENABLED` | `1` | 置 `0` 关闭文件日志 |
+| `BIGQMT_LOG_TO_STDOUT` | `1` | 置 `0` 不输出到 QMT 面板 |
+| `BIGQMT_LOG_RETENTION_DAYS` | `7` | 日志保留天数 |
+
+> **排错首选看日志文件**：QMT 面板内容重启/清空后丢失，日志文件保留 7 天，包含启动诊断（`[bigqmt_diag]`）、崩溃原因、端口冲突等。
+
+---
+
 ## 安全默认值
 
 - `rpc_allow_order_methods` 默认 `False`：远程 `order_stock` / `cancel_order` 被拒绝。确认接入方、账号、风控后再显式开启。
