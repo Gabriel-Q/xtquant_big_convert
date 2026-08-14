@@ -300,7 +300,9 @@ xtdata.get_local_data(["close"], ["600654.SH"], period="1d",
                       start_time="20240101", dividend_type="front")
 ```
 
-注意：QMT 服务端下载是**异步落盘**的，首次下载大区间后等几秒再拉复权数据；`download_history_data2` 已内置预下载 + 拉取，正常使用不需要手动等待。
+**读取类 API 也自愈**：`get_market_data_ex` / `get_market_data` 带复权参数时，若检测到返回全 0（服务端缺原始数据），会自动触发服务端下载、等待落盘、重试一次，拿到真实复权价。`get_local_data` 的 fallback 拉取同样受益。无需手动等待。
+
+注意：QMT 服务端下载是**异步落盘**的，自愈路径内置了等待 + 一次重试；极端大区间若一次重试仍全 0，可稍后重读或先显式 `download_history_data2`。
 
 ### 实盘卖出方向误判修复（exec_events）
 
