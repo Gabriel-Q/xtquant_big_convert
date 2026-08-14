@@ -797,6 +797,19 @@ class BigQmtRpcHandlers:
         if request.volume <= 0:
             raise ValueError("volume must be positive")
 
+        try:
+            from .exec_events import remember_order_identity
+
+            remember_order_identity(
+                getattr(self, "download_job_redis_client", None),
+                request.account_id,
+                request.remark,
+                strategy_name=request.strategy_name,
+                stock_code=request.stock_code,
+            )
+        except Exception:
+            pass
+
         result = self.order_gateway.submit(request)
 
         # 委托后校验：确认委托是否真的进了系统。passorder 调用成功但委托没进
