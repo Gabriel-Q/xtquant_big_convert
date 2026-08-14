@@ -720,7 +720,11 @@ class BigQmtRpcHandlers:
             return False
 
     def _handle_download_history_data2(self, params):
-        """download_history_data2 is a QMT global function (issue #32)."""
+        """download_history_data2 is a QMT global function (issue #32).
+
+        Native signature includes an optional callback for progress; the QMT
+        global may require it, so pass a no-op when the client didn't.
+        """
         func = self.qmt_api.get("download_history_data2")
         if func is not None:
             try:
@@ -728,7 +732,12 @@ class BigQmtRpcHandlers:
                 period = str(params.get("period") or "1d")
                 start_time = str(params.get("start_time") or "")
                 end_time = str(params.get("end_time") or "")
-                result = func(stock_list, period, start_time, end_time)
+                # Try with a no-op callback first (some QMT builds require it);
+                # fall back to 4-arg call if that raises TypeError.
+                try:
+                    result = func(stock_list, period, start_time, end_time, lambda data: None)
+                except TypeError:
+                    result = func(stock_list, period, start_time, end_time)
                 return bool(result) if result is not None else True
             except Exception as exc:
                 raise RuntimeError("download_history_data2 failed: %s" % exc)
