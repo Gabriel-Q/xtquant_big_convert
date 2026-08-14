@@ -11,6 +11,7 @@ import time
 import uuid
 import threading
 import importlib
+import datetime as _dt
 from typing import Any, Dict, Iterable, List, Optional
 
 from .full_tick_cache import request_full_tick_cache, wait_full_tick_cache
@@ -423,6 +424,78 @@ def _restore_jsonable(value):
     return value
 
 
+def _digits_only(value):
+    return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+def _parse_qmt_stime(value):
+    digits = _digits_only(value)
+    if len(digits) >= 14:
+        try:
+            return _dt.datetime.strptime(digits[:14], "%Y%m%d%H%M%S")
+        except ValueError:
+            return None
+    if len(digits) >= 8:
+        try:
+            return _dt.datetime.strptime(digits[:8], "%Y%m%d")
+        except ValueError:
+            return None
+    return None
+
+
+def _qmt_stime_index(value):
+    digits = _digits_only(value)
+    if len(digits) >= 14:
+        return digits[:14]
+    if len(digits) >= 8:
+        return digits[:8]
+    return str(value or "")
+
+
+def _qmt_datetime_to_epoch_ms(dt_value):
+    # QMT bar labels are China local time; MiniQMT's time column is epoch ms.
+    china_tz = _dt.timezone(_dt.timedelta(hours=8))
+    return int(dt_value.replace(tzinfo=china_tz).timestamp() * 1000)
+
+
+def _normalize_market_data_frame(df, field_list=None):
+    try:
+        columns = list(df.columns)
+    except Exception:
+        return df
+    if "stime" not in columns:
+        return df
+
+    requested = [str(field) for field in (field_list or [])]
+    try:
+        out = df.copy()
+        stimes = list(out["stime"])
+        out.index = [_qmt_stime_index(value) for value in stimes]
+        if "time" in out.columns or "time" in requested:
+            out["time"] = [
+                _qmt_datetime_to_epoch_ms(parsed) if parsed is not None else None
+                for parsed in (_parse_qmt_stime(value) for value in stimes)
+            ]
+        if requested:
+            keep = [field for field in requested if field in out.columns]
+            if keep:
+                return out[keep]
+        if "stime" in out.columns:
+            return out.drop(columns=["stime"])
+        return out
+    except Exception:
+        return df
+
+
+def _normalize_market_data_result(data, field_list=None):
+    if not isinstance(data, dict):
+        return data
+    return {
+        code: _normalize_market_data_frame(frame, field_list=field_list)
+        for code, frame in data.items()
+    }
+
+
 def _normalize_code_for_filter(code):
     text = str(code or "").strip().upper()
     if "." not in text:
@@ -830,9 +903,10 @@ class BigQmtXtData:
         # Live pull over RPC. Cache-through: whatever we fetch is written to the
         # local cache (keyed by dividend_type), so it stays the latest — important
         # for 前复权 (front-adjusted) data, whose history re-scales on each dividend.
+        fields = _as_list(field_list)
         data = self._call(
             "get_market_data_ex",
-            field_list=_as_list(field_list),
+            field_list=fields,
             stock_list=_as_list(stock_list),
             period=period,
             start_time=start_time,
@@ -841,6 +915,7 @@ class BigQmtXtData:
             dividend_type=dividend_type,
             fill_data=fill_data,
         )
+        data = _normalize_market_data_result(data, field_list=fields)
         cache = self._local_cache()
         if cache is not None and isinstance(data, dict):
             for code, df in data.items():
@@ -889,7 +964,10 @@ class BigQmtXtData:
         for code in codes:
             df = cache.read(code, period, start_time, end_time, count, dividend_type=dividend_type)
             if df is not None and getattr(df, "shape", (0,))[0] > 0:
-                result[code] = self._select_fields(df, fields)
+                result[code] = self._select_fields(
+                    _normalize_market_data_frame(df, field_list=fields),
+                    fields,
+                )
             else:
                 missing.append(code)
         if missing and _bool_value(self.client.local_cache_config.get("fallback_rpc"), False):
@@ -897,7 +975,10 @@ class BigQmtXtData:
             for code in missing:
                 df = fetched.get(code)
                 if df is not None and getattr(df, "shape", (0,))[0] > 0:
-                    result[code] = self._select_fields(df, fields)
+                    result[code] = self._select_fields(
+                        _normalize_market_data_frame(df, field_list=fields),
+                        fields,
+                    )
         return result
 
     @staticmethod
@@ -905,7 +986,7 @@ class BigQmtXtData:
         if not fields:
             return df
         try:
-            keep = [c for c in df.columns if c in fields or c in _TIME_COL_NAMES]
+            keep = [c for c in df.columns if c in fields or (c in _TIME_COL_NAMES and c != "stime")]
             return df[keep] if keep else df
         except Exception:
             return df

@@ -133,6 +133,25 @@ class FakeRpcClient:
         if method == "get_instrument_detail":
             return {"InstrumentStatus": 0, "code": params.get("code")}
         if method == "get_market_data_ex":
+            if params.get("stock_list") == ["159518.SZ"]:
+                try:
+                    import pandas as pd
+
+                    return {
+                        "159518.SZ": pd.DataFrame(
+                            {
+                                "stime": ["20250813 10:27:00", "20250813 10:28:00"],
+                                "time": [None, None],
+                                "open": [0.872, 0.873],
+                                "high": [0.873, 0.873],
+                                "low": [0.872, 0.872],
+                                "close": [0.872, 0.872],
+                                "volume": [2791.0, 1659.0],
+                            }
+                        )
+                    }
+                except Exception:
+                    return {"159518.SZ": []}
             return {"600000.SH": {"close": [10.0]}}
         if method == "ping":
             return {"pong": True}
@@ -358,6 +377,32 @@ class XtquantCompatTest(unittest.TestCase):
         self.assertEqual(detail["InstrumentStatus"], 0)
         self.assertEqual(sector_codes, ["000001.SZ", "300001.SZ", "600000.SH"])
         self.assertEqual(market_data["600000.SH"]["close"], [10.0])
+
+    def test_market_data_ex_normalizes_bigqmt_stime_to_miniqmt_shape(self):
+        try:
+            import pandas  # noqa: F401
+        except Exception:
+            self.skipTest("pandas not installed")
+
+        xtdata = self._xtdata()
+
+        data = xtdata.get_market_data_ex(
+            ["time", "open", "high", "low", "close", "volume"],
+            ["159518.SZ"],
+            period="1m",
+            start_time="20250601000000",
+            end_time="",
+            count=-1,
+        )
+        df = data["159518.SZ"]
+
+        self.assertEqual(list(df.index), ["20250813102700", "20250813102800"])
+        self.assertEqual(
+            list(df.columns),
+            ["time", "open", "high", "low", "close", "volume"],
+        )
+        self.assertEqual(int(df.iloc[0]["time"]), 1755052020000)
+        self.assertNotIn("stime", df.columns)
 
     def test_xtdata_full_tick_reads_redis_cache_and_renews_demand(self):
         xtdata = self._xtdata()
