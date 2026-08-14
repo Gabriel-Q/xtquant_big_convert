@@ -1019,12 +1019,41 @@ class BigQmtXtData:
         re-pulls live, so re-running keeps the cache latest — needed for 前复权
         (front-adjusted) data. ``callback`` (optional) is invoked once per stock with
         {finished, total, stockcode} — xtdata-style. Returns {finished, total}.
+
+        Adjusted data (dividend_type != none): Big QMT can only compute adjusted
+        bars after the RAW history + dividend factors are downloaded server-side.
+        Without that, get_market_data_ex(dividend_type='front') returns all-zero
+        closes (verified live). So we first trigger the server-side download
+        (download_history_data2 via RPC, which pulls raw bars + factors), then
+        pull the adjusted bars.
         """
         codes = [str(c) for c in (stock_list or []) if str(c or "").strip()]
         if not codes:
             return {"finished": 0, "total": 0}
         if self._local_cache() is None:
             raise RuntimeError("local cache is disabled (set local_cache_enabled=True to download)")
+
+        # Server-side raw download first when adjustment is requested: QMT
+        # computes front/back-adjusted bars from raw bars + dividend factors,
+        # and both must already exist server-side or the result is all zeros.
+        normalized = str(dividend_type or "none").lower()
+        if normalized not in ("", "none"):
+            try:
+                self.client.call(
+                    "download_history_data2",
+                    {
+                        "stock_list": codes,
+                        "period": period,
+                        "start_time": start_time,
+                        "end_time": end_time,
+                    },
+                    timeout_seconds=60.0,
+                )
+            except Exception:
+                # Best-effort: some deployments lack the QMT global; the pull
+                # below may still work if raw data already exists server-side.
+                pass
+
         total = len(codes)
         step = int(chunk_size or 300)
         if step <= 0:
