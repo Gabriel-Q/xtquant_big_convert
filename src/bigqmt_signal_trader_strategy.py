@@ -785,6 +785,7 @@ def _publish_exec_event(kind, obj):
             exec_events.publish_trade_event(redis_client, account_id, event)
         else:
             event = exec_events.normalize_order_event(obj, account_id)
+            event = exec_events.enrich_order_identity(redis_client, account_id, event)
             if raw_fields:
                 event["raw_fields"] = raw_fields
             exec_events.publish_order_event(redis_client, account_id, event)
