@@ -249,5 +249,72 @@ class AdjustedDownloadTest(unittest.TestCase):
         self.assertEqual(result, {"finished": 1, "total": 1})  # adjusted pull still ran
 
 
+class _AllZeroThenRealClient(FakeClient):
+    """First adjusted get_market_data_ex returns all-zero bars (server lacks
+    raw data); after a server-side raw download, subsequent pulls are real."""
+
+    def __init__(self, cache_dir):
+        super(_AllZeroThenRealClient, self).__init__(cache_dir)
+        self._downloaded = False
+
+    def call(self, method, params=None, account_id=None, timeout_seconds=None):
+        self.calls.append(method)
+        self.call_params.append((method, params))
+        import pandas as pd
+
+        if method == "download_history_data2":
+            self._downloaded = True
+            return True
+        if method == "get_market_data_ex":
+            codes = (params or {}).get("stock_list") or []
+            if self._downloaded:
+                return {c: pd.DataFrame({"stime": ["20260626", "20260629"], "close": [8.76, 8.73]}) for c in codes}
+            # all-zero symptom: head zeros, last bar live
+            return {c: pd.DataFrame({"stime": ["20260626", "20260629"], "close": [0.0, 8.73]}) for c in codes}
+        raise AssertionError("unexpected rpc: %s" % method)
+
+
+class AdjustedReadSelfHealTest(unittest.TestCase):
+    """Reading adjusted bars that come back all-zero must self-heal:
+    trigger a server-side raw download, wait, and retry once."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _xt(self):
+        from bigqmt_signal_trader.xtquant_compat import BigQmtXtData
+
+        return BigQmtXtData(_AllZeroThenRealClient(self.dir))
+
+    def test_front_read_self_heals_all_zero_to_real(self):
+        xt = self._xt()
+        data = xt.get_market_data_ex(
+            field_list=["close"], stock_list=["600000.SH"], period="1d",
+            dividend_type="front",
+        )
+        # After self-heal the retry returns real (non-zero) bars.
+        self.assertEqual(list(data["600000.SH"]["close"]), [8.76, 8.73])
+        # The heal path must have triggered a server-side raw download.
+        method_calls = [m for m, _ in xt.client.call_params]
+        self.assertIn("download_history_data2", method_calls)
+        # get_market_data_ex called twice: initial all-zero pull + retry.
+        self.assertEqual(method_calls.count("get_market_data_ex"), 2)
+
+    def test_none_read_does_not_self_heal(self):
+        xt = self._xt()
+        data = xt.get_market_data_ex(
+            field_list=["close"], stock_list=["600000.SH"], period="1d",
+            dividend_type="none",
+        )
+        # none returns whatever the server sent (no heal, single pull).
+        self.assertEqual(list(data["600000.SH"]["close"]), [0.0, 8.73])
+        method_calls = [m for m, _ in xt.client.call_params]
+        self.assertNotIn("download_history_data2", method_calls)
+        self.assertEqual(method_calls.count("get_market_data_ex"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
