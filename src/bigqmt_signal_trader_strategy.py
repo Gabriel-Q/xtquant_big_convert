@@ -195,7 +195,11 @@ _EXTRA_QMT_GLOBAL_FUNCS = (
     "get_option_subject_position",    # 期权标的持仓
     "get_comb_option",                # 组合期权
     "get_hkt_exchange_rate",          # 港股通汇率
-    "down_history_data",              # 大 QMT 内置历史行情下载函数
+    # download_history_data / download_history_data2 are global functions
+    # injected by QMT (not ContextInfo methods), same as passorder. They
+    # must be captured here so the adapter can call them. Issue #32.
+    "download_history_data",
+    "download_history_data2",
 )
 
 

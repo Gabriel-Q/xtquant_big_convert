@@ -877,10 +877,9 @@ class BigQmtXtData:
         dividend_type="none",
         fill_data=True,
     ):
-        return self._call(
-            "get_market_data",
-            field_list=_as_list(field_list),
-            stock_list=_as_list(stock_list),
+        params = dict(
+            field_list=list(field_list or []),
+            stock_list=list(stock_list or []),
             period=period,
             start_time=start_time,
             end_time=end_time,
@@ -888,6 +887,9 @@ class BigQmtXtData:
             dividend_type=dividend_type,
             fill_data=fill_data,
         )
+        data = self._call("get_market_data", **params)
+        # Self-heal adjusted reads (all-zero bars -> server raw download + retry).
+        return self._heal_adjusted("get_market_data", params, data)
 
     def get_market_data_ex(
         self,
@@ -903,11 +905,9 @@ class BigQmtXtData:
         # Live pull over RPC. Cache-through: whatever we fetch is written to the
         # local cache (keyed by dividend_type), so it stays the latest — important
         # for 前复权 (front-adjusted) data, whose history re-scales on each dividend.
-        fields = _as_list(field_list)
-        data = self._call(
-            "get_market_data_ex",
-            field_list=fields,
-            stock_list=_as_list(stock_list),
+        params = dict(
+            field_list=list(field_list or []),
+            stock_list=list(stock_list or []),
             period=period,
             start_time=start_time,
             end_time=end_time,
@@ -915,7 +915,9 @@ class BigQmtXtData:
             dividend_type=dividend_type,
             fill_data=fill_data,
         )
-        data = _normalize_market_data_result(data, field_list=fields)
+        data = self._call("get_market_data_ex", **params)
+        # Self-heal adjusted reads (all-zero bars -> server raw download + retry).
+        data = self._heal_adjusted("get_market_data_ex", params, data)
         cache = self._local_cache()
         if cache is not None and isinstance(data, dict):
             for code, df in data.items():
@@ -990,6 +992,74 @@ class BigQmtXtData:
             return df[keep] if keep else df
         except Exception:
             return df
+
+    @staticmethod
+    def _is_all_zero_any(data):
+        """Detect the all-zero adjusted-bars symptom (server lacks raw data).
+
+        Big QMT computes front/back-adjusted bars from raw bars + dividend
+        factors; when those are missing server-side the price columns come
+        back all 0.0 (only the last bar may hold the live price). Recursively
+        handles DataFrame, {code: DataFrame} and {field: {code: [..]}} shapes.
+        """
+        try:
+            if data is None:
+                return False
+            cols = getattr(data, "columns", None)
+            if cols is not None:  # pandas DataFrame
+                if "close" not in list(cols):
+                    return False
+                closes = data["close"]
+                if len(closes) == 0:
+                    return False
+                head = closes.iloc[:-1] if len(closes) > 1 else closes
+                return bool((head == 0).all())
+            if isinstance(data, dict):
+                return any(BigQmtXtData._is_all_zero_any(v) for v in data.values())
+            if isinstance(data, (list, tuple)) and data and all(
+                isinstance(x, (int, float)) for x in data
+            ):
+                head = data[:-1] if len(data) > 1 else data
+                return bool(head) and all(x == 0 for x in head)
+            return False
+        except Exception:
+            return False
+
+    def _ensure_server_raw(self, codes, period, start_time, end_time):
+        """Trigger a server-side raw download so adjusted bars can be computed."""
+        try:
+            self.client.call(
+                "download_history_data2",
+                {
+                    "stock_list": list(codes),
+                    "period": period,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                },
+                timeout_seconds=60.0,
+            )
+        except Exception:
+            pass
+
+    def _heal_adjusted(self, method, params, data, wait_seconds=2.0):
+        """Self-heal adjusted reads: if the adjusted pull came back all-zero,
+        trigger a server-side raw download, wait for async landing, retry once."""
+        dividend_type = str(params.get("dividend_type") or "none").lower()
+        if dividend_type in ("", "none"):
+            return data
+        if not self._is_all_zero_any(data):
+            return data
+        codes = list(params.get("stock_list") or params.get("stock_code") or [])
+        if not codes:
+            return data
+        self._ensure_server_raw(
+            codes,
+            params.get("period", "1d"),
+            params.get("start_time", ""),
+            params.get("end_time", ""),
+        )
+        time.sleep(wait_seconds)
+        return self._call(method, **params)
 
     def _pull_and_cache(self, codes, period, start_time, end_time, count, dividend_type="none"):
         """Fetch codes over RPC (get_market_data_ex already caches them)."""
@@ -1118,104 +1188,74 @@ class BigQmtXtData:
     def get_divid_factors(self, stock_code, start_time="", end_time=""):
         return self._call("get_divid_factors", stock_code=stock_code, start_time=start_time, end_time=end_time)
 
-    def submit_download_history_data2(
-        self,
-        stock_list,
-        period,
-        start_time="",
-        end_time="",
-        incrementally=None,
-        chunk_size=None,
-        job_ttl_seconds=3600,
-    ):
-        """Submit a server-side Big QMT history download job and return its status."""
+    def download_history_data2(self, stock_list, period, start_time="", end_time="", callback=None, incrementally=None, dividend_type="none", chunk_size=None):
+        """Pull bars from Big QMT over RPC and cache them locally, in batches.
+
+        Mirrors xtdata.download_history_data2: after this, get_local_data(..., the
+        same dividend_type) reads the data locally with no further RPC. Each batch
+        re-pulls live, so re-running keeps the cache latest — needed for 前复权
+        (front-adjusted) data. ``callback`` (optional) is invoked once per stock with
+        {finished, total, stockcode} — xtdata-style. Returns {finished, total}.
+
+        Adjusted data (dividend_type != none): Big QMT can only compute adjusted
+        bars after the RAW history + dividend factors are downloaded server-side.
+        Without that, get_market_data_ex(dividend_type='front') returns all-zero
+        closes (verified live). So we first trigger the server-side download
+        (download_history_data2 via RPC, which pulls raw bars + factors), then
+        pull the adjusted bars.
+        """
         codes = [str(c) for c in (stock_list or []) if str(c or "").strip()]
         if not codes:
-            return {"job_id": "", "state": "done", "done": 0, "total": 0, "error": ""}
-        return self._call(
-            "submit_download_history_data2",
-            stock_list=codes,
-            period=period,
-            start_time=start_time,
-            end_time=end_time,
-            incrementally=incrementally,
-            chunk_size=chunk_size,
-            job_ttl_seconds=job_ttl_seconds,
-        )
+            return {"finished": 0, "total": 0}
+        if self._local_cache() is None:
+            raise RuntimeError("local cache is disabled (set local_cache_enabled=True to download)")
 
-    def submit_download_history_data(
-        self,
-        stock_code,
-        period,
-        start_time="",
-        end_time="",
-        incrementally=None,
-        chunk_size=None,
-        job_ttl_seconds=3600,
-    ):
-        return self.submit_download_history_data2(
-            [stock_code],
-            period,
-            start_time,
-            end_time,
-            incrementally=incrementally,
-            chunk_size=chunk_size,
-            job_ttl_seconds=job_ttl_seconds,
-        )
+        # Server-side raw download first when adjustment is requested: QMT
+        # computes front/back-adjusted bars from raw bars + dividend factors,
+        # and both must already exist server-side or the result is all zeros.
+        normalized = str(dividend_type or "none").lower()
+        if normalized not in ("", "none"):
+            try:
+                self.client.call(
+                    "download_history_data2",
+                    {
+                        "stock_list": codes,
+                        "period": period,
+                        "start_time": start_time,
+                        "end_time": end_time,
+                    },
+                    timeout_seconds=60.0,
+                )
+            except Exception:
+                # Best-effort: some deployments lack the QMT global; the pull
+                # below may still work if raw data already exists server-side.
+                pass
 
-    def get_download_status(self, job_id):
-        return self._call("get_download_status", job_id=job_id)
-
-    def wait_download(self, job_id, timeout=None, poll_interval=None, callback=None):
-        if timeout is None:
-            timeout = getattr(self.client, "download_wait_seconds", 1800.0)
-        if poll_interval is None:
-            poll_interval = getattr(self.client, "download_poll_interval_seconds", 0.5)
-        deadline = time.time() + max(0.0, float(timeout))
-        last_done = None
-        while True:
-            status = self.get_download_status(job_id)
-            done = status.get("done") if isinstance(status, dict) else None
-            total = status.get("total") if isinstance(status, dict) else None
-            if callback is not None and done != last_done:
-                last_done = done
-                try:
-                    callback({"finished": done, "total": total, "job_id": job_id})
-                except Exception:
-                    pass
-            if status and status.get("state") in ("done", "failed"):
-                if status.get("state") == "failed":
-                    raise RuntimeError(status.get("error") or "download job failed")
-                return status
-            if time.time() >= deadline:
-                raise TimeoutError("download job timed out: %s" % job_id)
-            time.sleep(max(0.05, float(poll_interval)))
-
-    def download_history_data2(
-        self,
-        stock_list,
-        period,
-        start_time="",
-        end_time="",
-        callback=None,
-        incrementally=None,
-        dividend_type="none",
-        chunk_size=None,
-        timeout=None,
-    ):
-        """Submit a server-side Big QMT download job and wait for completion."""
-        job = self.submit_download_history_data2(
-            stock_list,
-            period,
-            start_time,
-            end_time,
-            incrementally=incrementally,
-            chunk_size=chunk_size,
-        )
-        job_id = job.get("job_id") if isinstance(job, dict) else ""
-        if not job_id:
-            return job
-        return self.wait_download(job_id, timeout=timeout, callback=callback)
+        total = len(codes)
+        step = int(chunk_size or 300)
+        if step <= 0:
+            step = 300
+        finished = 0
+        for i in range(0, total, step):
+            batch = codes[i:i + step]
+            # get_market_data_ex is cache-through: it writes each code to the cache.
+            self.get_market_data_ex(
+                field_list=DEFAULT_DOWNLOAD_FIELDS,
+                stock_list=batch,
+                period=period,
+                start_time=start_time,
+                end_time=end_time,
+                count=-1,
+                dividend_type=dividend_type,
+            )
+            for code in batch:
+                finished += 1
+                if callback is not None:
+                    try:
+                        callback({"finished": finished, "total": total, "stockcode": code})
+                    except Exception:
+                        pass
+        return {"finished": finished, "total": total}
 
     def download_history_data(self, stock_code, period, start_time="", end_time="", incrementally=None, dividend_type="none"):
         return self.download_history_data2([stock_code], period, start_time, end_time, dividend_type=dividend_type)

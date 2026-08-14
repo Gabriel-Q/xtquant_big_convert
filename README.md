@@ -194,6 +194,7 @@ xtdata.unsubscribe_quote(seq)
 - `get_divid_factors` / `get_risk_free_rate` —— 参数语义不同（区间 vs 单日、index vs timetag）。
 - **复权 K 线** —— 实测 `dividendType` 传 `none` 和 `front` 返回完全相同，复权未生效。因此只有
   `dividend_type="none"` 才走直连，其余回退 RPC，避免静默返回未复权价格。
+  （复权数据还需**先在服务端下载原始数据**，见下文「复权数据下载陷阱」。）
 
 配置（客户端侧，默认就是开启，通常不用写）：
 
@@ -277,6 +278,32 @@ QMT 原生安装、逐 Bar 同步协议、CSV 备用模式和安全边界见
 - `st="rpc_test"` → ORDER=3, DEAL=1（只有 rpc_test 的）
 - `st="bigqmt_signal_trader"` → ORDER=0, DEAL=0（空）
 
+### 复权数据下载陷阱（重要）
+
+**前/后复权 K 线必须先在服务端下载原始数据，否则返回全 0**。
+
+Big QMT 的复权（`dividend_type='front'`/`'back'`）是**服务端现场计算**的——需要原始 K 线 + 除权因子已经在服务端存在。直接请求 front 而服务端没下载过原始数据时，返回的 close 全是 `0.0`（只有最后一根有价）。
+
+实测复现（600654.SH / 600227.SH）：
+- 直接 `get_market_data_ex(dividend_type='front')` → 634 行全 0
+- 先 `download_history_data` 后再请求 → 真实复权价（front ≠ none，复权生效）
+
+**已修复**：`xtdata.download_history_data2(codes, period, dividend_type='front')` 现在会**自动先触发服务端原始数据下载**（拉原始 K 线 + 除权因子），再拉复权数据到本地缓存。用法不变：
+
+```python
+# 前复权下载（自动先服务端下载原始数据 + 除权因子）
+xtdata.download_history_data2(["600654.SH"], period="1d",
+                               start_time="20240101", dividend_type="front")
+
+# 之后本地读取（零 RPC）
+xtdata.get_local_data(["close"], ["600654.SH"], period="1d",
+                      start_time="20240101", dividend_type="front")
+```
+
+**读取类 API 也自愈**：`get_market_data_ex` / `get_market_data` 带复权参数时，若检测到返回全 0（服务端缺原始数据），会自动触发服务端下载、等待落盘、重试一次，拿到真实复权价。`get_local_data` 的 fallback 拉取同样受益。无需手动等待。
+
+注意：QMT 服务端下载是**异步落盘**的，自愈路径内置了等待 + 一次重试；极端大区间若一次重试仍全 0，可稍后重读或先显式 `download_history_data2`。
+
 ### 实盘卖出方向误判修复（exec_events）
 
 实盘发现：QMT 回调里 `m_nDirection` **恒为 48**（即使是卖出），导致卖出被误判为买入。
@@ -289,13 +316,74 @@ QMT 原生安装、逐 Bar 同步协议、CSV 备用模式和安全边界见
 
 对股票现货，direction=offset（48=买/49=卖）；对期货，direction≠offset，仲裁保正确。
 
+### 多账号使用（股票+期货 / 普通+信用）
+
+当前架构是**单账号单实例**——一个 QMT 策略进程绑定一个账号，RPC channel 按 `account_id` 隔离（`bigqmt:rpc:req:{account_id}`）。多账号场景（如股票+期货、普通+信用账户同时交易）的推荐方案是**在 QMT 里跑多个策略实例**，每个实例绑一个账号。
+
+#### 方案：多策略实例（推荐，不改代码）
+
+**服务端（QMT 内）**：为每个账号创建一个独立的配置文件和 DRYRUN 入口。
+
+```python
+# bigqmt_signal_trader_local_config_stock.py  — 股票账号
+BIGQMT_ACCOUNT_ID = "你的股票账号"
+BIGQMT_REDIS_CONFIG = {
+    "host": "...", "port": 6379, "db": 5, "password": "...",
+    "transport": "redis",          # 或 "zmq"
+    "account_type": "STOCK",       # 股票
+    # ...
+}
+
+# bigqmt_signal_trader_local_config_credit.py  — 信用账号
+BIGQMT_ACCOUNT_ID = "你的信用账号"
+BIGQMT_REDIS_CONFIG = {
+    "host": "...", "port": 6379, "db": 5, "password": "...",
+    "transport": "redis",
+    "account_type": "CREDIT",      # 信用（两融）
+    # ...
+}
+```
+
+然后在 QMT 策略编辑器里加载两个 DRYRUN 文件（每个指向不同的配置），分别运行。两个实例的 RPC channel 自动隔离（按 account_id）。
+
+> **zmq 模式注意**：每个实例的 zmq 端口从 account_id 派生（`15560 + account_id mod 100`），不同账号自动不冲突。
+
+**客户端（外部程序）**：为每个账号创建独立的 client/trader 对象。
+
+```python
+from bigqmt_signal_trader.xtquant_compat import BigQmtRpcClient, BigQmtXtTrader, StockAccount
+
+# 股票账号
+stock_client = BigQmtRpcClient(account_id="股票账号", redis_config={...})
+stock_trader = BigQmtXtTrader(account_id="股票账号", redis_client=stock_client.redis_client)
+stock_acc = StockAccount("股票账号", "STOCK")
+
+# 信用账号
+credit_client = BigQmtRpcClient(account_id="信用账号", redis_config={...})
+credit_trader = BigQmtXtTrader(account_id="信用账号", redis_client=credit_client.redis_client)
+credit_acc = StockAccount("信用账号", "CREDIT")
+
+# 分别查询/下单
+stock_asset = stock_trader.query_stock_asset(stock_acc)
+credit_positions = credit_trader.query_stock_positions(credit_acc)
+```
+
+> **跨账号隔离**：每个账号的 RPC channel、持仓查询、委托回报完全隔离（按 `account_id` 路由），互不影响。
+
 ---
 
 ## 环境要求与依赖安装
 
-### 作为 Python 包安装（推荐）
+本系统分两部分，各自需要自己的 Python 环境和依赖：
 
-本项目已发布为正式 Python 包，可直接 pip 安装：
+| 部分 | 运行位置 | Python | 装什么 |
+|------|---------|--------|--------|
+| **客户端**（外部程序）| 你的开发机 | 3.8+（推荐）| `pip install xtquant-big-convert` |
+| **服务端**（QMT 内）| QMT 的 `bin.x64/python.exe` | 3.6（QMT 自带）| 按传输装 1 个包 |
+
+### A. 客户端（外部程序，推荐 pip 安装）
+
+客户端就是**写策略/调接口的那台电脑**（也叫「开发机」）。直接 pip 安装：
 
 ```powershell
 # 基础安装（含 pyzmq，zmq 传输必需）
@@ -326,23 +414,25 @@ configure()
 print(xtdata.get_full_tick(["000001.SZ"]))
 ```
 
-### 大 QMT 端（服务端）
+### B. 服务端（QMT 内 Python 3.6）
 
-QMT 自带 Python 3.6（`bin.x64/python.exe`），需要按所选传输安装依赖：
+QMT 自带 Python 3.6（`bin.x64/python.exe`），**只需按你选的传输装对应依赖**：
 
-| 传输 | 必需依赖 | 安装方式 |
-|------|---------|---------|
-| **redis**（默认）| `redis`（QMT 通常已内置）| 无需额外安装 |
-| **zmq** | `pyzmq` | 见下 |
-| **mysql** | `pymysql` + `DBUtils` | 见下 |
+| 传输 | 服务端需要的包 | 客户端需要的包 |
+|------|--------------|--------------|
+| **redis**（默认）| `redis`（QMT 通常已内置）| `redis` |
+| **zmq** | `pyzmq` | `pyzmq`（基础安装已含）|
+| **mysql** | `pymysql` + `DBUtils` | `pymysql` + `DBUtils` |
 
-**安装 pyzmq / pymysql / DBUtils 到 QMT 的 Python：**
+> ⚠️ **用 redis 传输就不需要装 pyzmq / pymysql / DBUtils**——下面的安装说明是按需的，你用什么传输装什么。
 
-QMT 的 Python 3.6 用旧 OpenSSL，pip 直连 HTTPS 镜像会报 SSL 错误。推荐从开发机拷贝纯 Python 包（pyzmq 有 C 扩展需对应版本，pymysql/DBUtils 是纯 Python 可直接拷）：
+**安装到 QMT 的 Python（以 zmq / mysql 为例）：**
+
+QMT 的 Python 3.6 用旧 OpenSSL，pip 直连 HTTPS 镜像会报 SSL 错误。有两种方法：
 
 ```powershell
-# 方法 A：拷贝纯 Python 包（pymysql / DBUtils，推荐）
-# 在开发机（已装这些包）执行：
+# 方法 A：从开发机拷贝纯 Python 包（推荐，绕过 SSL 问题）
+# pymysql / DBUtils 是纯 Python，可直接拷贝；在开发机（已装这些包）执行：
 $QMT_SITE = "D:\国金证券QMT交易端\bin.x64\Lib\site-packages"
 Copy-Item -Recurse "C:\Users\<你>\anaconda3\Lib\site-packages\pymysql" "$QMT_SITE\pymysql"
 Copy-Item -Recurse "C:\Users\<你>\anaconda3\Lib\site-packages\dbutils" "$QMT_SITE\dbutils"
@@ -357,21 +447,13 @@ cd D:\国金证券QMT交易端
 .\bin.x64\python.exe -c "import pymysql; from dbutils.pooled_db import PooledDB; print('OK')"
 ```
 
-> pyzmq 包含 C 扩展，Python 3.6 需装 `pyzmq==19.0.2`（最后一个支持 3.6 的版本）。如果 SSL 装不上，可下载对应 wheel 手动 `pip install xxx.whl`。
-
-### 客户端（外部程序）
-
-客户端用你的开发 Python（3.8+ 推荐）：
-
-```powershell
-pip install redis          # redis 传输必需
-pip install pyzmq          # zmq 传输（可选）
-pip install pymysql DBUtils  # mysql 传输（可选）
-```
+> **pyzmq 特殊说明**：包含 C 扩展，不能直接拷贝。Python 3.6 需装 `pyzmq==19.0.2`（最后一个支持 3.6 的版本）。如果 SSL 装不上，可下载对应 wheel 手动 `pip install xxx.whl`。
 
 ---
 
 ## 快速开始
+
+> 前置：客户端已按上面「A. 客户端」装好包；服务端按「B. 服务端」装好所选传输的依赖。下面是从零跑通整套流程的步骤。
 
 ### 第 1 步：同步代码到 QMT 的 python 目录
 
