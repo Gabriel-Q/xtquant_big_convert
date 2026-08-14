@@ -232,12 +232,13 @@ def _build_config():
     if _account_id:
         config["account_id"] = _account_id
     qmt_api = dict(config.get("qmt_api") or {})
-    qmt_api.setdefault("passorder", _resolve_runtime_name("passorder"))
-    qmt_api.setdefault("cancel", _resolve_runtime_name("cancel"))
-    qmt_api.setdefault("get_trade_detail_data", _resolve_runtime_name("get_trade_detail_data"))
+    for name in ("passorder", "cancel", "get_trade_detail_data"):
+        if qmt_api.get(name) is None:
+            qmt_api[name] = _resolve_runtime_name(name)
     # 解析其余官方全局函数（存在则注入，不存在保持 None）。
     for name in _EXTRA_QMT_GLOBAL_FUNCS:
-        qmt_api.setdefault(name, _resolve_runtime_name(name))
+        if qmt_api.get(name) is None:
+            qmt_api[name] = _resolve_runtime_name(name)
     config["qmt_api"] = qmt_api
     return config
 
@@ -387,7 +388,7 @@ def _build_rpc_service(context_info, app, config):
     )
     handlers = BigQmtRpcHandlers(
         account_id=account_id,
-        market_data=BigQmtMarketDataProvider(context_info),
+        market_data=BigQmtMarketDataProvider(context_info, qmt_api=qmt_api),
         position_provider=BigQmtPositionProvider(
             get_trade_detail_data_func=qmt_api.get("get_trade_detail_data"),
             account_type=config.get("account_type", "STOCK"),
@@ -399,6 +400,9 @@ def _build_rpc_service(context_info, app, config):
         qmt_api=qmt_api,
         quote_subscription_manager=quote_manager,
     )
+    handlers.download_job_redis_client = response_redis_client or redis_client
+    handlers.download_job_chunk_size = int((config.get("download_jobs") or {}).get("chunk_size") or 10)
+    handlers.download_job_ttl_seconds = int((config.get("download_jobs") or {}).get("job_ttl_seconds") or 3600)
     process_in_listener = _config_bool(rpc_config.get("process_in_listener"), True)
     listener_methods = rpc_config.get("listener_methods") or ("*",)
     configured_bg = _config_bool(rpc_config.get("background_threads"), False)
@@ -734,7 +738,7 @@ def _diag_startup(ContextInfo, config):
 
     # 2. Key QMT function bindings
     qmt_api = dict(config.get("qmt_api") or {})
-    for name in ("passorder", "cancel", "get_trade_detail_data"):
+    for name in ("passorder", "cancel", "get_trade_detail_data", "down_history_data"):
         bound = qmt_api.get(name) is not None
         print("[bigqmt_diag] %s bound=%s" % (name, bound))
 
@@ -772,7 +776,7 @@ def _pump_download_jobs(context_info, config):
     if market_data is None:
         from bigqmt_signal_trader.adapters.market_bigqmt import BigQmtMarketDataProvider
 
-        market_data = BigQmtMarketDataProvider(context_info)
+        market_data = BigQmtMarketDataProvider(context_info, qmt_api=dict(config.get("qmt_api") or {}))
     try:
         from bigqmt_signal_trader.download_jobs import pump_download_jobs
 
@@ -897,6 +901,7 @@ def _publish_exec_event(kind, obj):
             exec_events.publish_trade_event(redis_client, account_id, event)
         else:
             event = exec_events.normalize_order_event(obj, account_id)
+            event = exec_events.enrich_order_identity(redis_client, account_id, event)
             if raw_fields:
                 event["raw_fields"] = raw_fields
             exec_events.publish_order_event(redis_client, account_id, event)
@@ -915,24 +920,16 @@ def _publish_exec_event(kind, obj):
         _log_err("exec_events", "publish %s failed: %s" % (kind, exc))
 
 
-def on_order(ContextInfo, order):
-    _publish_exec_event("order", order)
-    return forward_order_event(BigQmtRuntimeAdapter.to_order_event(order))
-
-
-def on_trade(ContextInfo, trade):
-    _publish_exec_event("trade", trade)
-    return forward_trade_event(BigQmtRuntimeAdapter.to_trade_event(trade))
-
-
 def order_callback(ContextInfo, orderInfo):
     """Standard Big QMT order callback."""
-    return on_order(ContextInfo, orderInfo)
+    _publish_exec_event("order", orderInfo)
+    return forward_order_event(BigQmtRuntimeAdapter.to_order_event(orderInfo))
 
 
 def deal_callback(ContextInfo, dealInfo):
     """Standard Big QMT deal callback."""
-    return on_trade(ContextInfo, dealInfo)
+    _publish_exec_event("trade", dealInfo)
+    return forward_trade_event(BigQmtRuntimeAdapter.to_trade_event(dealInfo))
 
 
 def sync_positions(ContextInfo):
