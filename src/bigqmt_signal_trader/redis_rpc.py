@@ -1166,7 +1166,20 @@ class RedisPubSubRpcService:
                 "%s deferred method=%s pending_before=%s"
                 % (self.print_prefix, payload.get("method"), self.pending.qsize())
             )
-        self.pending.put_nowait(payload)
+        try:
+            self.pending.put_nowait(payload)
+        except queue.Full:
+            # A full pending queue (client polling storm) must not raise into the
+            # adjust thread — QMT stops the strategy on a callback raise. Drop the
+            # oldest request and keep the newest instead of crashing.
+            try:
+                self.pending.get_nowait()
+            except Exception:
+                pass
+            try:
+                self.pending.put_nowait(payload)
+            except Exception:
+                pass
 
     def _should_process_in_listener(self, payload):
         if not self.process_in_listener:
@@ -1263,7 +1276,20 @@ class RedisPubSubRpcService:
                 response["server_error"] = str(server_error)
         except Exception as exc:
             response["error"] = "%s: %s" % (exc.__class__.__name__, exc)
-        self._publish_response(request, response)
+        try:
+            self._publish_response(request, response)
+        except Exception:
+            # A response-publish failure (e.g. redis outage) must not propagate
+            # to the adjust thread — QMT stops the strategy on a callback raise.
+            # The request already ran; the client will just see a timeout.
+            import traceback as _tb
+            try:
+                from .logging_setup import get_logger
+                get_logger("rpc").error(
+                    "publish response failed method=%s:\n%s", method, _tb.format_exc()
+                )
+            except Exception:
+                pass
         self._processed_count += 1
         if self._processed_count <= self.debug_log_limit:
             print("%s responded method=%s ok=%s" % (self.print_prefix, method, response["ok"]))
