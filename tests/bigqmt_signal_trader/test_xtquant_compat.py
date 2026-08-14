@@ -52,6 +52,12 @@ class FakeRpcClient:
                     "volume": 1000,
                     "available": 800,
                     "cost": 10.2,
+                    "price": 10.8,
+                    "market_value": 10800.0,
+                    "frozen_volume": 200,
+                    "on_road_volume": 5,
+                    "yesterday_volume": 900,
+                    "direction": 48,
                     "stock_name": "PF Bank",
                 }
             }
@@ -231,6 +237,12 @@ class XtquantCompatTest(unittest.TestCase):
         self.assertEqual(positions[0].stock_code, "600000.SH")
         self.assertEqual(positions[0].can_use_volume, 800)
         self.assertEqual(positions[0].avg_price, 10.2)
+        self.assertEqual(positions[0].price, 10.8)
+        self.assertEqual(positions[0].market_value, 10800.0)
+        self.assertEqual(positions[0].frozen_volume, 200)
+        self.assertEqual(positions[0].on_road_volume, 5)
+        self.assertEqual(positions[0].yesterday_volume, 900)
+        self.assertEqual(positions[0].direction, 48)
         self.assertEqual(single.stock_code, "600000.SH")
 
     def test_orders_trades_order_and_cancel_are_miniqmt_shaped(self):

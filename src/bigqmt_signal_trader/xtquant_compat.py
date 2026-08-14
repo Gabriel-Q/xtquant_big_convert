@@ -1729,6 +1729,40 @@ class BigQmtXtTrader:
             market_value=_safe_float(market_value, 0.0) if market_value is not None else 0.0,
         )
 
+    def _position_object(self, account_id, item):
+        volume = _safe_int(item.get("volume"))
+        available = _safe_int(item.get("available", item.get("can_use_volume")))
+        cost = _safe_float(item.get("cost", item.get("avg_price")))
+        price = _safe_float(item.get("price", item.get("last_price")), cost)
+        market_value = item.get("market_value")
+        if market_value is None:
+            market_value = price * volume
+        return CompatObject(
+            account_type=2,
+            account_id=account_id,
+            stock_code=str(item.get("stock_code") or ""),
+            stock_name=str(item.get("stock_name") or ""),
+            volume=volume,
+            can_use_volume=available,
+            enable_amount=available,
+            available_amount=available,
+            avg_price=cost,
+            price=price,
+            open_price=_safe_float(item.get("open_price"), cost),
+            cost_price=cost,
+            market_value=_safe_float(market_value, 0.0),
+            frozen_volume=_safe_int(item.get("frozen_volume")),
+            on_road_volume=_safe_int(item.get("on_road_volume")),
+            yesterday_volume=_safe_int(item.get("yesterday_volume"), volume),
+            direction=_safe_int(item.get("direction"), 48),
+        )
+
+    @staticmethod
+    def _position_items(data):
+        if isinstance(data, dict):
+            return list(data.values())
+        return _as_list(data)
+
     def query_stock_positions(self, account):
         account_id = _account_id(account, self.client.account_id)
         try:
@@ -1739,29 +1773,7 @@ class BigQmtXtTrader:
             data = self._cached_positions(account_id)
             if not data:
                 raise
-        positions = []
-        for item in _as_list(data):
-            stock_code = str(item.get("stock_code") or "")
-            volume = _safe_int(item.get("volume"))
-            available = _safe_int(item.get("available", item.get("can_use_volume")))
-            cost = _safe_float(item.get("cost", item.get("avg_price")))
-            positions.append(
-                CompatObject(
-                    account_id=account_id,
-                    stock_code=stock_code,
-                    stock_name=str(item.get("stock_name") or ""),
-                    volume=volume,
-                    can_use_volume=available,
-                    enable_amount=available,
-                    available_amount=available,
-                    avg_price=cost,
-                    price=cost,
-                    open_price=cost,
-                    cost_price=cost,
-                    yesterday_volume=_safe_int(item.get("yesterday_volume"), volume),
-                )
-            )
-        return positions
+        return [self._position_object(account_id, item) for item in self._position_items(data)]
 
     def query_stock_position(self, account, stock_code):
         account_id = _account_id(account, self.client.account_id)
@@ -1785,20 +1797,7 @@ class BigQmtXtTrader:
         if not data:
             return None
         return [
-            CompatObject(
-                account_id=account_id,
-                stock_code=str(item.get("stock_code") or ""),
-                stock_name=str(item.get("stock_name") or ""),
-                volume=_safe_int(item.get("volume")),
-                can_use_volume=_safe_int(item.get("available", item.get("can_use_volume"))),
-                enable_amount=_safe_int(item.get("available", item.get("can_use_volume"))),
-                available_amount=_safe_int(item.get("available", item.get("can_use_volume"))),
-                avg_price=_safe_float(item.get("cost", item.get("avg_price"))),
-                price=_safe_float(item.get("cost", item.get("avg_price"))),
-                open_price=_safe_float(item.get("cost", item.get("avg_price"))),
-                cost_price=_safe_float(item.get("cost", item.get("avg_price"))),
-                yesterday_volume=_safe_int(item.get("yesterday_volume"), _safe_int(item.get("volume"))),
-            )
+            self._position_object(account_id, item)
             for item in [data]
         ][0]
 
