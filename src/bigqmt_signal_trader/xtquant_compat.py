@@ -918,6 +918,9 @@ class BigQmtXtData:
         data = self._call("get_market_data_ex", **params)
         # Self-heal adjusted reads (all-zero bars -> server raw download + retry).
         data = self._heal_adjusted("get_market_data_ex", params, data)
+        # Normalize Big QMT's stime-indexed frame to MiniQMT shape (time-indexed).
+        if isinstance(data, dict):
+            data = _normalize_market_data_result(data, field_list=params.get("field_list"))
         cache = self._local_cache()
         if cache is not None and isinstance(data, dict):
             for code, df in data.items():
