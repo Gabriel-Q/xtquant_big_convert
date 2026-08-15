@@ -1,6 +1,6 @@
 ---
 name: qmt-trader
-description: "通过统一 CLI 脚本驱动大 QMT 迅投量化交易端的全部能力，含实时行情查询、K线历史数据、账户资产与持仓查询、委托与成交查询、买入卖出下单、撤单、板块龙虎榜北向资金财务数据等。适用于大模型辅助量化交易分析、行情研判、持仓监控、半自动下单等场景。当用户需要查看股票行情、分析K线、查询持仓资产、查看今日委托成交、下单买卖、撤单、查询北向资金龙虎榜财务数据时触发此 skill。"
+description: "通过统一 CLI 脚本驱动大 QMT 迅投量化交易端的全部能力，含实时行情查询、K线历史数据、账户资产与持仓查询、委托与成交查询、买入卖出下单、撤单、板块龙虎榜北向资金财务数据等，并内置 xtquant_big_convert 桥接服务的安装部署引导（装包/同步 QMT 端文件/配置/启动验证/排错）。适用于大模型辅助量化交易分析、行情研判、持仓监控、半自动下单等场景。当用户需要查看股票行情、分析K线、查询持仓资产、查看今日委托成交、下单买卖、撤单、查询北向资金龙虎榜财务数据，或需要安装部署 QMT RPC 桥接服务时触发此 skill。"
 ---
 
 # QMT Trader — 大模型驱动的 QMT 交易/行情工具
@@ -11,8 +11,100 @@ description: "通过统一 CLI 脚本驱动大 QMT 迅投量化交易端的全�
 交易与行情能力，避免每次现场写 Python 代码。所有命令默认输出 JSON（便于解析），加 `--table`
 切换人类可读表格。
 
-**前置条件**：大 QMT 进程已启动并在运行 `BIGQMT_REDIS_DRYRUN.py`（RPC 服务端就绪），
-Redis/ZMQ 可连通，客户端已配置账号信息（环境变量或配置文件）。
+**前置条件**：本 skill 依赖 xtquant_big_convert 桥接服务已部署运行。若 `ping` 失败或用户尚未部署，
+先按下文「首次部署」引导完成：装包 → 同步 QMT 端文件 → 写配置 → QMT 里运行入口 → 验证。
+
+## 首次部署（只需一次，AI 逐步引导用户完成）
+
+部署分两端：**客户端**（跑本 skill/策略的开发机）和**服务端**（大 QMT 客户端内置 Python）。
+
+### 第 1 步：客户端安装包
+
+```bash
+pip install "xtquant-big-convert[redis]"   # redis 传输（默认，推荐）
+# 或 zmq 同机低延迟：pip install xtquant-big-convert（基础版已含 pyzmq）
+```
+
+> 没发布到 PyPI 的私有 fork 用源码安装：`git clone <repo> && cd xtquant_big_convert && pip install -e .[redis]`
+
+### 第 2 步：把服务端文件同步到 QMT 的 python 目录
+
+需要拷 4 项到大 QMT 的 `python` 目录（如 `D:\国金证券QMT交易端\python\`）：
+
+```
+bigqmt_signal_trader/                  （整个包，pip 装的在 site-packages 里）
+bigqmt_signal_trader_strategy.py
+bigqmt_signal_trader_redis_rpc_runtime.py
+BIGQMT_REDIS_DRYRUN.py                 （★ QMT 编辑器入口，GBK 编码）
+```
+
+pip 安装后的文件位置可以用这条命令定位（输出目录里就有全部 4 项）：
+
+```bash
+python -c "import bigqmt_signal_trader_strategy as m, os; print(os.path.dirname(m.__file__))"
+```
+
+> QMT 沙箱若拒绝 `import redis`（部分券商白名单拦截），改用仓库里的 `bigqmt_no_redis/` 无 redis 版本（自包含 ZMQ 传输）。
+
+### 第 3 步：创建 QMT 端私有配置
+
+在 QMT 的 `python` 目录创建 `bigqmt_signal_trader_local_config.py`（含账号密码，**不要提交 git**）：
+
+```python
+# coding: utf-8
+BIGQMT_ACCOUNT_ID = "资金账号"
+BIGQMT_REDIS_CONFIG = {
+    "host": "Redis地址", "port": 6379, "db": 5, "password": "Redis密码",
+    "rpc_allow_order_methods": False,     # 下单开关，默认关闭；确认风控后改 True
+    "rpc_process_in_listener": True,
+    "rpc_listener_methods": ("*",),
+    "rpc_background_threads": False,      # 若切 zmq/mysql 传输必须改 True
+    "schedule_adjust": True,
+    "schedule_adjust_interval": "500nMilliSecond",
+}
+```
+
+> 切 zmq：配置里加 `"transport": "zmq"` 并把 `rpc_background_threads` 改 `True`（QMT 端需装 pyzmq 19.0.2，Python 3.6 最后支持的版本）。
+
+### 第 4 步：在 QMT 策略编辑器运行入口
+
+QMT 策略编辑器里**只加载运行 `BIGQMT_REDIS_DRYRUN.py` 一个文件**（它自动 import 其余模块）。
+若 QMT 装在非默认路径且用 exec 方式加载，需改文件里 `_known_qmt_python_dir()` 的 fallback 路径。
+
+启动成功标志（QMT 输出面板）：
+
+```
+[bigqmt_shell] local redis config loaded keys=[...]
+[bigqmt_shell] local account config loaded=True
+[bigqmt_rpc] started channel=bigqmt:rpc:req:你的账号
+[bigqmt_signal_trader] init ok
+```
+
+### 第 5 步：客户端配置 + 验证
+
+客户端用环境变量（或 `bigqmt_signal_trader_client_config.py`）指向同一套 Redis/账号：
+
+```powershell
+$env:BIGQMT_ACCOUNT_ID="资金账号"
+$env:BIGQMT_REDIS_HOST="Redis地址"; $env:BIGQMT_REDIS_PORT="6379"
+$env:BIGQMT_REDIS_DB="5"; $env:BIGQMT_REDIS_PASSWORD="Redis密码"
+```
+
+然后验证（redis ~13ms / zmq ~0.7ms 为正常）：
+
+```bash
+python scripts/qmt.py ping
+```
+
+### 部署排错速查
+
+| 现象 | 排查 |
+|------|------|
+| `ping` 超时 | 客户端/服务端 transport 不一致（一边 redis 一边 zmq）；QMT 端服务没启动；Redis 地址/密码/db 不一致 |
+| QMT 面板报 `import redis` 被拒 | 换 `bigqmt_no_redis/` 无 redis 版本 |
+| 启动了但查询全空 | 账号没对上：服务端 `BIGQMT_ACCOUNT_ID` vs 客户端 `BIGQMT_ACCOUNT_ID`；QMT 需在实盘模式 |
+| 下单报 `ORDER_DISABLED` | 正常保护，服务端配置 `rpc_allow_order_methods` 改 `True` 才放行 |
+| 详细错误日志 | QMT python 目录下 `logs/bigqmt_*.log`（保留 7 天），排错首选 |
 
 ## 快速开始
 
