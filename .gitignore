@@ -25,3 +25,4 @@ dist/
 # Generated evidence from standalone/QMT backtest bridge runs.
 backtest_runs/
 qmt_backtest_runs/
+.workbuddy/
