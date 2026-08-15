@@ -837,6 +837,7 @@ Get-Content "D:\...\python\logs\bigqmt.log" | Select-String "ERROR|WARN"
 
 ## 相关文档
 
+- [CHANGELOG.md](CHANGELOG.md) — **版本变更记录**（新增/修复/变更）
 - [docs/RPC_API_REFERENCE.md](docs/RPC_API_REFERENCE.md) — **全部 RPC 方法参考**（参数、返回值、别名、大 QMT 能力边界）
 - [docs/FORMULA_SERVER_FASTPATH.md](docs/FORMULA_SERVER_FASTPATH.md) — FormulaServer(58600) 直连快速路径：协议、映射表、能力边界与回退行为
 - [docs/SUBSCRIBE_WHOLE_QUOTE_PUSH.md](docs/SUBSCRIBE_WHOLE_QUOTE_PUSH.md) — 全推行情订阅推送机制设计
@@ -846,6 +847,7 @@ Get-Content "D:\...\python\logs\bigqmt.log" | Select-String "ERROR|WARN"
 - [docs/XTQUANT_COMPAT_REPLACEMENT.md](docs/XTQUANT_COMPAT_REPLACEMENT.md) — 用兼容层替换旧 xtquant 的步骤
 - [docs/BIG_QMT_SIGNAL_TRADER_RUNBOOK.md](docs/BIG_QMT_SIGNAL_TRADER_RUNBOOK.md) — 信号交易运行手册
 - [docs/ZMQ_BACKTEST_BRIDGE.md](docs/ZMQ_BACKTEST_BRIDGE.md) — 独立 ZMQ 回测协议、撮合规则和 QMT 入口
+- [qmt-trader/](qmt-trader/) — **QMT Trader skill**：统一 CLI 驱动全部 QMT API（46 子命令 + 通用 rpc 兜底）
 
 ---
 
