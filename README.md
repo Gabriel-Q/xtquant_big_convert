@@ -1,8 +1,14 @@
 # xtquant_big_convert
 
+[![PyPI](https://img.shields.io/pypi/v/xtquant-big-convert.svg)](https://pypi.org/project/xtquant-big-convert/)
+[![Python](https://img.shields.io/pypi/pyversions/xtquant-big-convert.svg)](https://pypi.org/project/xtquant-big-convert/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 大 QMT 运行环境里的 RPC 桥接包：把大 QMT 内置 Python（行情查询、交易、持仓）封装成**可远程调用的服务**，并兼容一组 MiniQMT 方法名，让外部程序无需 XtQuantServer 权限就能驱动大 QMT。
 
 支持 **Redis / ZMQ / MySQL / 共享内存** 四种可插拔传输，切换只需改一个配置字段。
+
+已发布 PyPI，客户端一行安装：`pip install xtquant-big-convert`（详见下文「环境要求与依赖安装」）。
 
 另附 [qmt-trader skill](qmt-trader/)：让 Claude Code / ZCode / Cursor 等 AI 助手通过统一 CLI（46 个子命令）直接查行情、查持仓、下单撤单，详见下文「AI 助手 Skill：qmt-trader」。
 
