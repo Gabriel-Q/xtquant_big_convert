@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **正常下单误报 on_order_error(-1)**（Issue #38）：passorder 提交成功但委托号异步分配，客户端把「暂无 order_sys_id」误判为失败。服务端 `_handle_submit_order` 按唯一 `user_order_id`(remark) 匹配并回填 `order_sys_id`；顺带修掉校验代码对无 `.get()` 方法的 `OrderSnapshot` 调 `.get()` 的死代码（server_error 之前从未生效）。客户端 `call()` 不再丢弃 `server_error`，委托未进系统时转成异常，`order_stock_async` 携带真实原因回调 `on_order_error`。
+
 ### 新增
 
 - qmt-trader skill 内置「首次部署」引导：客户端装包、QMT 端文件同步、私有配置模板、入口启动验证、部署排错速查，零上下文也能从零跑通。

@@ -747,6 +747,12 @@ class BigQmtRpcClient:
             )
         if not response.get("ok"):
             raise RuntimeError(response.get("error") or "Big QMT RPC failed: %s" % method)
+        # server_error 携带 QMT 端诊断（如 passorder 提交但委托没进系统）。
+        # 只在交易类方法上设置（读取类恒为空），转成异常让调用方看到真实原因，
+        # 而不是把「无委托号」误判为 -1 失败（issue #38）。
+        server_error = str(response.get("server_error") or "")
+        if server_error:
+            raise RuntimeError("Big QMT %s server_error: %s" % (method, server_error))
         return _restore_jsonable(response.get("data"))
 
     def publish_event(self, event_type, payload, stream_template="bigqmt:quote_events:{account_id}"):

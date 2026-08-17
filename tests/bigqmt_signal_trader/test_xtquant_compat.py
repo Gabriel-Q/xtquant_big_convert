@@ -603,6 +603,25 @@ class XtquantCompatTest(unittest.TestCase):
         self.assertEqual(len(request["request_id"]), 32)
         int(request["request_id"], 16)
 
+    def test_client_call_raises_on_server_error(self):
+        # issue #38: server_error（QMT 端诊断，如 passorder 提交但委托没进系统）
+        # 之前被 call() 静默丢弃，导致下单流程看不到真实原因。现在必须转成异常。
+        class _FakeTransport:
+            def send_request(self, request, timeout_seconds):
+                return {
+                    "ok": True,
+                    "data": {"status": "SUBMITTED", "order_sys_id": ""},
+                    "server_error": "passorder submitted but order not found in system",
+                }
+
+        client = BigQmtRpcClient(account_id="acct", redis_config={"host": "127.0.0.1"})
+        client.transport_name = "zmq"
+        client._transport_instance = _FakeTransport()
+
+        with self.assertRaises(RuntimeError) as ctx:
+            client.call("order_stock", {"stock_code": "600000.SH"})
+        self.assertIn("not found in system", str(ctx.exception))
+
     def test_zmq_with_explicit_address_never_builds_redis_discovery(self):
         client = BigQmtRpcClient(
             account_id="acct",
