@@ -291,6 +291,8 @@ class XtquantCompatTest(unittest.TestCase):
         self.assertEqual(order_id, "sys-2")
         self.assertTrue(cancelled)
         self.assertEqual(trader.client.calls[-2][1]["price_type"], MARKET_PEER_PRICE_FIRST)
+        # strategy_name 默认 ""（返回全部委托），与服务端一致（strategy_name 陷阱）。
+        self.assertEqual(trader.client.calls[-4][1]["strategy_name"], "")
 
     def test_execution_snapshot_maps_orders_and_trades_with_one_rpc(self):
         trader = self._trader()

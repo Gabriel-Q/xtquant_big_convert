@@ -1931,7 +1931,9 @@ class BigQmtXtTrader:
             for item in [data]
         ][0]
 
-    def query_stock_orders(self, account, cancelable_only=False, strategy_name="bigqmt_signal_trader"):
+    def query_stock_orders(self, account, cancelable_only=False, strategy_name=""):
+        # strategy_name 默认 ""（返回全部）：与服务端一致，避免下单用的策略名
+        # 与查询默认值不匹配导致委托查不到（strategy_name 陷阱）。
         account_id = _account_id(account, self.client.account_id)
         data = self.client.call(
             "query_stock_orders",
