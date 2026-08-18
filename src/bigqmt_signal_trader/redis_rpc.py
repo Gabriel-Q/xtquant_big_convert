@@ -405,6 +405,12 @@ class BigQmtRpcHandlers:
         requested_method = str(method or "").strip()
         method = self._canonical_method(requested_method)
         params = dict(params or {})
+        # Clear the diagnostic slot per request. It is instance state read by
+        # EVERY response (see _build_response), so without this a single failed
+        # submit_order stamps its server_error onto every later ping/query until
+        # the next order runs -- reporting a stale failure on requests that
+        # succeeded (issue #43).
+        self._last_server_error = ""
         if not requested_method:
             raise ValueError("method is required")
         if method not in self.allowed_methods:
@@ -866,7 +872,8 @@ class BigQmtRpcHandlers:
         result = self.order_gateway.submit(request)
 
         # 委托后校验：确认委托是否真的进了系统。passorder 调用成功但委托没进
-        # 系统时（静默失败），记录 server_error 让客户端知道。
+        # 系统时（静默失败），记录 server_error 让客户端知道。匹配严格按
+        # user_order_id(remark) 精确比对，不做 stock_code+action 的模糊兜底。
         # QMT 的委托号是异步分配的（passorder 无返回值），这里按唯一
         # user_order_id(remark) 精确匹配并回填 order_sys_id，避免客户端把
         # 「已提交但暂无委托号」误判为下单失败（issue #38）。
@@ -886,11 +893,13 @@ class BigQmtRpcHandlers:
                         result.order_sys_id = sysid
                     except Exception:
                         pass
-            elif not any(
-                str(getattr(o, "stock_code", "") or "").upper() == request.stock_code.upper()
-                and str(getattr(o, "action", "") or "").upper() == request.action.upper()
-                for o in orders
-            ):
+            else:
+                # No remark match -> the order is not in the system. Do NOT fall
+                # back to matching stock_code+action: order_tag is a unique id we
+                # generated, so a miss is always a real miss, while an unrelated
+                # order on the same stock and side (a manual one, or an earlier
+                # unfilled order) would silently suppress this warning and leave
+                # order_sys_id unfilled with no signal at all (issue #41).
                 self._last_server_error = (
                     "passorder submitted but order not found in system "
                     "(stock=%s action=%s price=%.2f volume=%d). "

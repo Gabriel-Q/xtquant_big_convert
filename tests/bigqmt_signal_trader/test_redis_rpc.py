@@ -311,6 +311,104 @@ class RedisRpcTest(unittest.TestCase):
         self.assertIsNone(result.order_sys_id)
         self.assertIn("not found in system", handlers._last_server_error)
 
+    def test_server_error_does_not_leak_into_later_requests(self):
+        """issue #43: _last_server_error is instance state read by every response,
+        so a failed order used to stamp its error onto every later read."""
+        gateway = LandingOrderGateway(landed=False)
+        handlers = BigQmtRpcHandlers(
+            account_id="acct", market_data=FakeMarketData(),
+            position_provider=FakePositionProvider(), order_gateway=gateway,
+            allow_order_methods=True,
+        )
+        handlers.handle("order_stock", {
+            "account_id": "acct", "stock_code": "600000.SH", "order_type": 23,
+            "order_volume": 100, "price_type": 11, "price": 10.0,
+            "order_remark": "REMARK-43",
+        })
+        self.assertIn("not found in system", handlers._last_server_error)
+
+        # Any later request must start from a clean slot.
+        handlers.handle("ping", {})
+        self.assertEqual(handlers._last_server_error, "")
+        handlers.handle("get_positions", {"account_id": "acct"})
+        self.assertEqual(handlers._last_server_error, "")
+
+    def test_server_error_cleared_even_when_method_is_rejected(self):
+        """A rejected request must not carry the previous diagnostic either."""
+        gateway = LandingOrderGateway(landed=False)
+        handlers = BigQmtRpcHandlers(
+            account_id="acct", market_data=FakeMarketData(),
+            position_provider=FakePositionProvider(), order_gateway=gateway,
+            allow_order_methods=True,
+        )
+        handlers.handle("order_stock", {
+            "account_id": "acct", "stock_code": "600000.SH", "order_type": 23,
+            "order_volume": 100, "price_type": 11, "price": 10.0,
+            "order_remark": "REMARK-43b",
+        })
+        self.assertNotEqual(handlers._last_server_error, "")
+        with self.assertRaises(ValueError):
+            handlers.handle("no_such_method", {})
+        self.assertEqual(handlers._last_server_error, "")
+
+    def test_unrelated_same_stock_order_does_not_mask_a_silent_rejection(self):
+        """issue #41: an unrelated order on the same stock+side used to suppress
+        the warning, leaving order_sys_id unfilled with no signal at all."""
+        gateway = LandingOrderGateway(landed=False)
+        # Pre-existing order: same stock and side, different (unrelated) remark.
+        gateway.orders.append(
+            OrderSnapshot(
+                order_sys_id="sysid-unrelated",
+                user_order_id="SOMEONE-ELSE",
+                stock_code="600000.SH",
+                action="BUY",
+                volume=200,
+                traded_volume=0,
+                status="50",
+            )
+        )
+        handlers = BigQmtRpcHandlers(
+            account_id="acct", market_data=FakeMarketData(),
+            position_provider=FakePositionProvider(), order_gateway=gateway,
+            allow_order_methods=True,
+        )
+        result = handlers.handle("order_stock", {
+            "account_id": "acct", "stock_code": "600000.SH", "order_type": 23,
+            "order_volume": 100, "price_type": 11, "price": 10.0,
+            "order_remark": "REMARK-41",
+        })
+
+        self.assertIsNone(result.order_sys_id)
+        self.assertIn("not found in system", handlers._last_server_error)
+
+    def test_remark_match_still_backfills_sysid_with_other_orders_present(self):
+        """The strict match must not regress the issue #38 backfill."""
+        gateway = LandingOrderGateway(landed=True)
+        gateway.orders.append(
+            OrderSnapshot(
+                order_sys_id="sysid-unrelated",
+                user_order_id="SOMEONE-ELSE",
+                stock_code="600000.SH",
+                action="BUY",
+                volume=200,
+                traded_volume=0,
+                status="50",
+            )
+        )
+        handlers = BigQmtRpcHandlers(
+            account_id="acct", market_data=FakeMarketData(),
+            position_provider=FakePositionProvider(), order_gateway=gateway,
+            allow_order_methods=True,
+        )
+        result = handlers.handle("order_stock", {
+            "account_id": "acct", "stock_code": "600000.SH", "order_type": 23,
+            "order_volume": 100, "price_type": 11, "price": 10.0,
+            "order_remark": "REMARK-38b",
+        })
+
+        self.assertEqual(result.order_sys_id, "sysid-1")
+        self.assertEqual(handlers._last_server_error, "")
+
     def test_submit_orders_batch_reuses_order_tag_without_resubmitting(self):
         gateway = CountingOrderGateway()
         handlers = BigQmtRpcHandlers(
