@@ -1,4 +1,5 @@
 import json
+import time
 import os
 import sys
 import unittest
@@ -82,6 +83,9 @@ def _service_with_listener_methods(allow_order_methods=False, process_in_listene
         position_provider=FakePositionProvider(),
         order_gateway=order_gateway,
         allow_order_methods=allow_order_methods,
+        # DryRunOrderGateway never registers an order, so retrying until the
+        # deadline would just stall every test by the full timeout.
+        order_settle_timeout_seconds=0.0,
     )
     return redis_client, RedisPubSubRpcService(
         redis_client,
@@ -205,8 +209,144 @@ def _service_with_order_gateway(order_gateway, allow_order_methods=False):
         position_provider=FakePositionProvider(),
         order_gateway=order_gateway,
         allow_order_methods=allow_order_methods,
+        order_settle_timeout_seconds=0.0,
     )
     return redis_client, RedisPubSubRpcService(redis_client, handlers, account_id="acct")
+
+
+class LateLandingOrderGateway(DryRunOrderGateway):
+    """QMT assigns the order id asynchronously: the order only becomes visible
+    after ``appear_after`` lookups."""
+
+    def __init__(self, appear_after=2, never=False):
+        super().__init__()
+        self.appear_after = appear_after
+        self.never = never
+        self.lookups = 0
+        self._request = None
+
+    def submit(self, request):
+        self._request = request
+        return super().submit(request)
+
+    def query_orders(self, account_id, strategy_name):
+        self.lookups += 1
+        if self.never or self.lookups < self.appear_after or self._request is None:
+            return []
+        return [
+            OrderSnapshot(
+                order_sys_id="sysid-late",
+                user_order_id=str(self._request.remark or ""),
+                stock_code=self._request.stock_code,
+                action=self._request.action,
+                volume=self._request.volume,
+                traded_volume=0,
+                status="50",
+            )
+        ]
+
+
+class AsyncOrderSettlementTest(unittest.TestCase):
+    """issue #44: passorder must not hold the QMT adjust thread.
+
+    The old path slept 0.5s inline, serializing every other request behind each
+    order and capping throughput at ~2 orders/sec.
+    """
+
+    def _service(self, gateway, timeout=5.0):
+        redis_client = FakeRedis()
+        handlers = BigQmtRpcHandlers(
+            account_id="acct", market_data=FakeMarketData(),
+            position_provider=FakePositionProvider(), order_gateway=gateway,
+            allow_order_methods=True, order_settle_timeout_seconds=timeout,
+        )
+        return redis_client, RedisPubSubRpcService(redis_client, handlers, account_id="acct")
+
+    def _submit(self, service, request_id="ord-1"):
+        service.enqueue_payload({
+            "request_id": request_id, "account_id": "acct", "method": "order_stock",
+            "params": {"stock_code": "600000.SH", "order_type": 23, "order_volume": 100,
+                       "price_type": 11, "price": 10.1, "order_remark": request_id},
+        })
+
+    def test_drain_does_not_sleep_waiting_for_the_order_id(self):
+        """The whole point: no 0.5s block on the adjust thread."""
+        gateway = LateLandingOrderGateway(appear_after=99)
+        redis_client, service = self._service(gateway)
+        self._submit(service)
+
+        started = time.monotonic()
+        service.drain_pending()
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.2, "drain blocked for %.3fs" % elapsed)
+
+    def test_unresolved_order_is_parked_not_answered(self):
+        gateway = LateLandingOrderGateway(appear_after=99)
+        redis_client, service = self._service(gateway)
+        self._submit(service)
+        service.drain_pending()
+
+        self.assertNotIn("bigqmt:rpc:resp:acct:ord-1", redis_client.kv)
+        self.assertEqual(service.pending_settlement_count(), 1)
+
+    def test_later_tick_settles_and_backfills_the_sysid(self):
+        gateway = LateLandingOrderGateway(appear_after=3)
+        redis_client, service = self._service(gateway)
+        self._submit(service)
+
+        for _ in range(5):
+            service.drain_pending()
+            if "bigqmt:rpc:resp:acct:ord-1" in redis_client.kv:
+                break
+
+        response = json.loads(redis_client.kv["bigqmt:rpc:resp:acct:ord-1"])
+        self.assertTrue(response["ok"], response["error"])
+        self.assertEqual(response["data"]["order_sys_id"], "sysid-late")
+        self.assertEqual(response["server_error"], "")
+        self.assertEqual(service.pending_settlement_count(), 0)
+
+    def test_order_that_never_lands_reports_after_the_deadline(self):
+        gateway = LateLandingOrderGateway(never=True)
+        redis_client, service = self._service(gateway, timeout=0.0)
+        self._submit(service)
+        service.drain_pending()
+
+        response = json.loads(redis_client.kv["bigqmt:rpc:resp:acct:ord-1"])
+        self.assertTrue(response["ok"])
+        self.assertIn("not found in system", response["server_error"])
+
+    def test_settlement_error_does_not_leak_into_other_responses(self):
+        """issue #43 again, by another route: settling happens long after the
+        order left the handler, so its diagnostic must ride on the settlement
+        rather than handlers._last_server_error."""
+        gateway = LateLandingOrderGateway(never=True)
+        redis_client, service = self._service(gateway, timeout=0.0)
+        self._submit(service)
+        service.drain_pending()
+        self.assertIn("not found in system",
+                      json.loads(redis_client.kv["bigqmt:rpc:resp:acct:ord-1"])["server_error"])
+
+        service.enqueue_payload({"request_id": "later-ping", "account_id": "acct",
+                                 "method": "ping", "params": {}})
+        service.drain_pending()
+
+        self.assertEqual(
+            json.loads(redis_client.kv["bigqmt:rpc:resp:acct:later-ping"])["server_error"], "")
+
+    def test_many_orders_drain_without_accumulating_delay(self):
+        """Throughput was the reported symptom: 0.5s per order serialized."""
+        gateway = LateLandingOrderGateway(appear_after=99)
+        redis_client, service = self._service(gateway)
+        for i in range(20):
+            self._submit(service, request_id="ord-%d" % i)
+
+        started = time.monotonic()
+        service.drain_pending(max_items=50)
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 1.0, "20 orders took %.2fs" % elapsed)
+        self.assertEqual(service.pending_settlement_count(), 20)
 
 
 class RedisRpcTest(unittest.TestCase):
@@ -286,6 +426,10 @@ class RedisRpcTest(unittest.TestCase):
             account_id="acct", market_data=FakeMarketData(),
             position_provider=FakePositionProvider(), order_gateway=gateway,
             allow_order_methods=True,
+            # Drive the lookup synchronously so these assertions stay about the
+            # matching logic, not about when the settle pass runs.
+            settle_orders_inline=True,
+            order_settle_timeout_seconds=0.0,
         )
         result = handlers.handle("order_stock", {
             "account_id": "acct", "stock_code": "600000.SH", "order_type": 23,
@@ -302,6 +446,10 @@ class RedisRpcTest(unittest.TestCase):
             account_id="acct", market_data=FakeMarketData(),
             position_provider=FakePositionProvider(), order_gateway=gateway,
             allow_order_methods=True,
+            # Drive the lookup synchronously so these assertions stay about the
+            # matching logic, not about when the settle pass runs.
+            settle_orders_inline=True,
+            order_settle_timeout_seconds=0.0,
         )
         result = handlers.handle("order_stock", {
             "account_id": "acct", "stock_code": "600000.SH", "order_type": 23,
@@ -319,6 +467,10 @@ class RedisRpcTest(unittest.TestCase):
             account_id="acct", market_data=FakeMarketData(),
             position_provider=FakePositionProvider(), order_gateway=gateway,
             allow_order_methods=True,
+            # Drive the lookup synchronously so these assertions stay about the
+            # matching logic, not about when the settle pass runs.
+            settle_orders_inline=True,
+            order_settle_timeout_seconds=0.0,
         )
         handlers.handle("order_stock", {
             "account_id": "acct", "stock_code": "600000.SH", "order_type": 23,
@@ -340,6 +492,10 @@ class RedisRpcTest(unittest.TestCase):
             account_id="acct", market_data=FakeMarketData(),
             position_provider=FakePositionProvider(), order_gateway=gateway,
             allow_order_methods=True,
+            # Drive the lookup synchronously so these assertions stay about the
+            # matching logic, not about when the settle pass runs.
+            settle_orders_inline=True,
+            order_settle_timeout_seconds=0.0,
         )
         handlers.handle("order_stock", {
             "account_id": "acct", "stock_code": "600000.SH", "order_type": 23,
@@ -371,6 +527,10 @@ class RedisRpcTest(unittest.TestCase):
             account_id="acct", market_data=FakeMarketData(),
             position_provider=FakePositionProvider(), order_gateway=gateway,
             allow_order_methods=True,
+            # Drive the lookup synchronously so these assertions stay about the
+            # matching logic, not about when the settle pass runs.
+            settle_orders_inline=True,
+            order_settle_timeout_seconds=0.0,
         )
         result = handlers.handle("order_stock", {
             "account_id": "acct", "stock_code": "600000.SH", "order_type": 23,
@@ -399,6 +559,10 @@ class RedisRpcTest(unittest.TestCase):
             account_id="acct", market_data=FakeMarketData(),
             position_provider=FakePositionProvider(), order_gateway=gateway,
             allow_order_methods=True,
+            # Drive the lookup synchronously so these assertions stay about the
+            # matching logic, not about when the settle pass runs.
+            settle_orders_inline=True,
+            order_settle_timeout_seconds=0.0,
         )
         result = handlers.handle("order_stock", {
             "account_id": "acct", "stock_code": "600000.SH", "order_type": 23,
@@ -415,6 +579,10 @@ class RedisRpcTest(unittest.TestCase):
             account_id="acct", market_data=FakeMarketData(),
             position_provider=FakePositionProvider(), order_gateway=gateway,
             allow_order_methods=True,
+            # Drive the lookup synchronously so these assertions stay about the
+            # matching logic, not about when the settle pass runs.
+            settle_orders_inline=True,
+            order_settle_timeout_seconds=0.0,
         )
         params = {
             "batch_id": "BATCH-1",
@@ -437,6 +605,10 @@ class RedisRpcTest(unittest.TestCase):
             account_id="acct", market_data=FakeMarketData(),
             position_provider=FakePositionProvider(), order_gateway=gateway,
             allow_order_methods=True,
+            # Drive the lookup synchronously so these assertions stay about the
+            # matching logic, not about when the settle pass runs.
+            settle_orders_inline=True,
+            order_settle_timeout_seconds=0.0,
         )
 
         result = handlers.handle("order_stock_batch", {
@@ -459,6 +631,10 @@ class RedisRpcTest(unittest.TestCase):
             account_id="acct", market_data=FakeMarketData(),
             position_provider=FakePositionProvider(), order_gateway=gateway,
             allow_order_methods=True,
+            # Drive the lookup synchronously so these assertions stay about the
+            # matching logic, not about when the settle pass runs.
+            settle_orders_inline=True,
+            order_settle_timeout_seconds=0.0,
         )
 
         result = handlers.handle("order_stock_batch", {
@@ -488,6 +664,10 @@ class RedisRpcTest(unittest.TestCase):
             account_id="acct", market_data=FakeMarketData(),
             position_provider=FakePositionProvider(), order_gateway=gateway,
             allow_order_methods=True,
+            # Drive the lookup synchronously so these assertions stay about the
+            # matching logic, not about when the settle pass runs.
+            settle_orders_inline=True,
+            order_settle_timeout_seconds=0.0,
         )
 
         result = handlers.handle("order_stock_batch", {
@@ -507,6 +687,10 @@ class RedisRpcTest(unittest.TestCase):
             account_id="acct", market_data=FakeMarketData(),
             position_provider=FakePositionProvider(), order_gateway=gateway,
             allow_order_methods=True,
+            # Drive the lookup synchronously so these assertions stay about the
+            # matching logic, not about when the settle pass runs.
+            settle_orders_inline=True,
+            order_settle_timeout_seconds=0.0,
         )
 
         result = handlers.handle("order_stock_batch", {
