@@ -2,6 +2,13 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
+## [Unreleased]
+
+### 修复
+
+- **异步下单的 order/trade 事件先于 async_response 到达**（Issue #51）：两条回调走不同通道——`async_response` 在异步下单工作线程触发，`order`/`trade` 来自 Redis pub/sub 监听线程；服务端 `order_callback` 先推事件、后回 RPC，顺序颠倒是常态。客户端按 `order_remark` 设屏障：命中待响应委托的事件先暂存，response（或 error）触发后按到达顺序放行；10 秒超时兜底，提交失败的事件也不会被永久扣住（丢事件比顺序错乱更糟）。仅 `order_stock_async` 路径受影响，手工/同步/无 remark 委托直通。成交事件无 remark 时按委托事件学到的 `order_sys_id` 关联。已验证：9 个单测（含 4 个反向验证）+ 盘后真实 Redis 注入实测（部署环境 `async_response → stock_order → stock_trade` 保序成立）。盘中真实下单验证待交易时段进行。
+- **重复 order_remark 导致暂存事件丢失**（Issue #51 后续）：`order_remark` 不强制唯一（网格类策略常复用同一 remark），同 remark 的第二笔下单会让 `_arm_order_barrier` 直接覆盖前一笔的屏障，暂存事件被静默丢弃；且前一笔的 response 会误放后一笔的屏障，使后一笔失去保序。改为接管旧屏障时先放行其暂存事件；`_release_order_barrier` 增加 seq 校验，只有 arm 时的那笔委托的 response 才能放行对应屏障。回归测试对任一半修复回退均失败。
+
 ## [0.2.2] - 2026-08-19
 
 ### 修复
