@@ -21,6 +21,9 @@ from .redis_rpc import call_redis_rpc
 
 # Default OHLCV fields pulled + cached by get_local_data fallback_rpc.
 DEFAULT_DOWNLOAD_FIELDS = ["open", "high", "low", "close", "volume", "amount"]
+# Codes per get_market_data_ex request. One request carries a single RPC timeout,
+# so a wide stock_list either fits or loses everything (issue #47).
+DEFAULT_MARKET_DATA_CHUNK = 100
 _TIME_COL_NAMES = ("stime", "time", "index", "date", "datetime", "timetag")
 
 
@@ -897,6 +900,16 @@ class BigQmtXtData:
         # Self-heal adjusted reads (all-zero bars -> server raw download + retry).
         return self._heal_adjusted("get_market_data", params, data)
 
+    def _get_market_data_ex_batch(self, params, timeout_seconds=None):
+        """One RPC's worth of bars, healed and normalized. No caching."""
+        data = self._call("get_market_data_ex", timeout_seconds=timeout_seconds, **params)
+        # Self-heal adjusted reads (all-zero bars -> server raw download + retry).
+        data = self._heal_adjusted("get_market_data_ex", params, data)
+        # Normalize Big QMT's stime-indexed frame to MiniQMT shape (time-indexed).
+        if isinstance(data, dict):
+            data = _normalize_market_data_result(data, field_list=params.get("field_list"))
+        return data
+
     def get_market_data_ex(
         self,
         field_list=None,
@@ -907,13 +920,26 @@ class BigQmtXtData:
         count=-1,
         dividend_type="none",
         fill_data=True,
+        chunk_size=None,
+        timeout_seconds=None,
     ):
-        # Live pull over RPC. Cache-through: whatever we fetch is written to the
-        # local cache (keyed by dividend_type), so it stays the latest — important
-        # for 前复权 (front-adjusted) data, whose history re-scales on each dividend.
-        params = dict(
+        """Pull bars over RPC, in batches of ``chunk_size`` codes.
+
+        Cache-through: whatever is fetched is written to the local cache (keyed
+        by dividend_type), so it stays the latest -- important for 前复权 data,
+        whose history re-scales on each dividend.
+
+        Batching exists because one request carrying every code shares a single
+        RPC timeout (6s by default), so a wide stock_list times out and loses
+        the whole pull rather than degrading (issue #47). Splitting keeps each
+        request small enough to answer, and a batch that still fails only costs
+        its own codes -- the rest are returned.
+
+        ``chunk_size=0`` restores the old single-request behaviour.
+        """
+        codes = list(stock_list or [])
+        base = dict(
             field_list=list(field_list or []),
-            stock_list=list(stock_list or []),
             period=period,
             start_time=start_time,
             end_time=end_time,
@@ -921,12 +947,36 @@ class BigQmtXtData:
             dividend_type=dividend_type,
             fill_data=fill_data,
         )
-        data = self._call("get_market_data_ex", **params)
-        # Self-heal adjusted reads (all-zero bars -> server raw download + retry).
-        data = self._heal_adjusted("get_market_data_ex", params, data)
-        # Normalize Big QMT's stime-indexed frame to MiniQMT shape (time-indexed).
-        if isinstance(data, dict):
-            data = _normalize_market_data_result(data, field_list=params.get("field_list"))
+        step = DEFAULT_MARKET_DATA_CHUNK if chunk_size is None else int(chunk_size)
+
+        if step <= 0 or len(codes) <= step:
+            data = self._get_market_data_ex_batch(
+                dict(base, stock_list=codes), timeout_seconds=timeout_seconds
+            )
+        else:
+            data = {}
+            failures = []
+            for index in range(0, len(codes), step):
+                batch = codes[index:index + step]
+                try:
+                    part = self._get_market_data_ex_batch(
+                        dict(base, stock_list=batch), timeout_seconds=timeout_seconds
+                    )
+                except Exception as exc:
+                    # Losing one batch must not lose the others: a partial
+                    # result beats an exception when 500 codes were asked for.
+                    failures.append((batch, exc))
+                    continue
+                if isinstance(part, dict):
+                    data.update(part)
+            if failures and not data:
+                # Nothing came back at all -- surface the first cause rather
+                # than returning a silent empty dict.
+                raise failures[0][1]
+            for batch, exc in failures:
+                print("[bigqmt_client] get_market_data_ex batch failed (%d codes, first=%s): %s"
+                      % (len(batch), batch[0] if batch else "", exc))
+
         cache = self._local_cache()
         if cache is not None and isinstance(data, dict):
             for code, df in data.items():
@@ -1197,7 +1247,7 @@ class BigQmtXtData:
     def get_divid_factors(self, stock_code, start_time="", end_time=""):
         return self._call("get_divid_factors", stock_code=stock_code, start_time=start_time, end_time=end_time)
 
-    def download_history_data2(self, stock_list, period, start_time="", end_time="", callback=None, incrementally=None, dividend_type="none", chunk_size=None):
+    def download_history_data2(self, stock_list, period, start_time="", end_time="", callback=None, incrementally=None, dividend_type="none", chunk_size=None, download_timeout_seconds=180.0):
         """Pull bars from Big QMT over RPC and cache them locally, in batches.
 
         Mirrors xtdata.download_history_data2: after this, get_local_data(..., the
@@ -1206,12 +1256,18 @@ class BigQmtXtData:
         (front-adjusted) data. ``callback`` (optional) is invoked once per stock with
         {finished, total, stockcode} — xtdata-style. Returns {finished, total}.
 
-        Adjusted data (dividend_type != none): Big QMT can only compute adjusted
-        bars after the RAW history + dividend factors are downloaded server-side.
-        Without that, get_market_data_ex(dividend_type='front') returns all-zero
-        closes (verified live). So we first trigger the server-side download
-        (download_history_data2 via RPC, which pulls raw bars + factors), then
-        pull the adjusted bars.
+        The server-side download runs for EVERY dividend_type, matching
+        xtdata semantics ("populate the local QMT store"). It used to be skipped
+        for unadjusted pulls, which made an unadjusted download a no-op that
+        still reported progress (issue #47).
+
+        Adjusted data (dividend_type != none) additionally depends on it: Big QMT
+        computes adjusted bars from the RAW history + dividend factors, and
+        without both, get_market_data_ex(dividend_type='front') returns all-zero
+        closes (verified live).
+
+        ``download_timeout_seconds`` covers the server-side download only; it is
+        generous because a cold code with a wide window can take minutes.
         """
         codes = [str(c) for c in (stock_list or []) if str(c or "").strip()]
         if not codes:
@@ -1219,26 +1275,38 @@ class BigQmtXtData:
         if self._local_cache() is None:
             raise RuntimeError("local cache is disabled (set local_cache_enabled=True to download)")
 
-        # Server-side raw download first when adjustment is requested: QMT
-        # computes front/back-adjusted bars from raw bars + dividend factors,
-        # and both must already exist server-side or the result is all zeros.
-        normalized = str(dividend_type or "none").lower()
-        if normalized not in ("", "none"):
-            try:
-                self.client.call(
-                    "download_history_data2",
-                    {
-                        "stock_list": codes,
-                        "period": period,
-                        "start_time": start_time,
-                        "end_time": end_time,
-                    },
-                    timeout_seconds=60.0,
-                )
-            except Exception:
-                # Best-effort: some deployments lack the QMT global; the pull
-                # below may still work if raw data already exists server-side.
-                pass
+        # Server-side download first, for EVERY dividend_type.
+        #
+        # This used to run only when adjustment was requested, on the reasoning
+        # that an unadjusted pull can be served straight from get_market_data_ex.
+        # That reads whatever Big QMT already has -- it does not fetch anything.
+        # So an unadjusted "download" left the QMT-side store untouched while
+        # still reporting {finished: N} through the callback: a progress bar for
+        # work that never happened (issue #47, and the real cause behind #39,
+        # which was closed on an incomplete reading of this function).
+        #
+        # xtdata.download_history_data means "populate the local QMT store", and
+        # callers depend on that: FormulaServer and get_local_data both read it,
+        # and codes "downloaded" this way had zero bars there.
+        #
+        # Adjusted data additionally NEEDS this: QMT computes front/back-adjusted
+        # bars from raw bars + dividend factors, and both must exist server-side
+        # or the result is all zeros.
+        try:
+            self.client.call(
+                "download_history_data2",
+                {
+                    "stock_list": codes,
+                    "period": period,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                },
+                timeout_seconds=float(download_timeout_seconds),
+            )
+        except Exception:
+            # Best-effort: some deployments lack the QMT global; the pull below
+            # may still work if the data already exists server-side.
+            pass
 
         total = len(codes)
         step = int(chunk_size or 300)
@@ -2396,6 +2464,9 @@ class BigQmtXtTrader:
             order_id=order_sysid or str(item.get("user_order_id") or ""),
             strategy_name=str(item.get("strategy_name") or ""),
             order_remark=str(item.get("remark") or item.get("user_order_id") or ""),
+            # MiniQMT XtOrder.order_time 是 Unix 秒。0 = 服务端未上报
+            # (旧服务端不带这个字段), 不要当成 1970 年 (issue #48)。
+            order_time=_safe_int(item.get("order_time"), 0),
         )
 
     def _trade_from_dict(self, account_id, item):
