@@ -919,6 +919,17 @@ class BigQmtRpcHandlers:
         # user_order_id(remark) 精确匹配并回填 order_sys_id，避免客户端把
         # 「已提交但暂无委托号」误判为下单失败（issue #38）。
         self._last_server_error = ""
+
+        # Async callers opt out of waiting for the order id. MiniQMT's
+        # order_stock_async returns a seq immediately and delivers the id through
+        # order_callback, so holding the reply until settlement is exactly the
+        # latency the async API exists to avoid (issue #50). The order_callback
+        # push already carries order_sys_id, so nothing is lost -- only the
+        # post-submit "did it land?" check is skipped, and a silent rejection
+        # surfaces as the absence of that push rather than as server_error.
+        if not _bool_value(params.get("wait_settlement"), True):
+            return result
+
         if self.settle_orders_inline:
             # Opt-out: block here the way this used to. Kept only for runtimes
             # with no adjust drain to retry on.
