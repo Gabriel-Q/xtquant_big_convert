@@ -2,7 +2,7 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
-## [Unreleased]
+## [0.2.3] - 2026-08-19
 
 ### 修复
 
