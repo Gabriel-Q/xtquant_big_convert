@@ -9,6 +9,7 @@ import os
 import json
 import time
 import uuid
+import queue as _queue
 import threading
 import importlib
 import datetime as _dt
@@ -1710,6 +1711,11 @@ class BigQmtXtTrader:
         self.callback = None
         self._event_thread = None
         self._event_running = False
+        # Async order submission (issue #50). One worker, started on first use,
+        # so a client that never calls order_stock_async pays nothing.
+        self._async_order_queue = _queue.Queue()
+        self._async_order_thread = None
+        self._async_order_lock = threading.Lock()
 
     def _cached_position_snapshot(self, account_id):
         key = "bigqmt:positions:%s" % str(account_id or self.client.account_id or "")
@@ -2077,8 +2083,15 @@ class BigQmtXtTrader:
 
     def order_stock_result(
         self, account, stock_code, order_type, order_volume, price_type,
-        price, strategy_name, order_remark,
+        price, strategy_name, order_remark, wait_settlement=True,
     ):
+        """Submit one order over RPC.
+
+        ``wait_settlement=False`` tells the server to reply as soon as passorder
+        returns instead of holding the reply until QMT assigns the order id.
+        The async path uses it; the id then arrives through order_callback
+        (issue #50).
+        """
         account_id = _account_id(account, self.client.account_id)
         user_order_id = str(order_remark or "").strip()
         if not user_order_id:
@@ -2093,6 +2106,8 @@ class BigQmtXtTrader:
             "strategy_name": strategy_name,
             "order_remark": user_order_id,
         }
+        if not wait_settlement:
+            payload["wait_settlement"] = False
         try:
             return self.client.call("order_stock", payload, account_id=account_id) or {}
         except TimeoutError as exc:
@@ -2101,17 +2116,47 @@ class BigQmtXtTrader:
                 % (user_order_id, exc)
             )
 
-    def order_stock_async(self, *args, **kwargs):
-        # MiniQMT semantics: returns a seq; the result comes back through
-        # on_order_stock_async_response(seq, order_error|None). Our RPC is
-        # synchronous under the hood, so we fire the response callback
-        # immediately with the seq and the submitted order.
-        seq = self._next_async_seq()
+    def _async_order_worker(self):
+        """Drain queued async orders, one at a time.
+
+        A single worker rather than a pool: the server handles order RPCs on
+        the QMT adjust thread serially anyway, so concurrency here buys little,
+        while serializing keeps on_order_stock_async_response arriving in
+        submission order. For real batch throughput use order_stock_batch.
+        """
+        while True:
+            job = self._async_order_queue.get()
+            if job is None:          # shutdown sentinel
+                self._async_order_queue.task_done()
+                return
+            seq, args, kwargs = job
+            try:
+                self._run_async_order(seq, args, kwargs)
+            except Exception:
+                # A worker that dies takes every later async order with it.
+                pass
+            finally:
+                self._async_order_queue.task_done()
+
+    def _ensure_async_order_worker(self):
+        with self._async_order_lock:
+            if self._async_order_thread is not None and self._async_order_thread.is_alive():
+                return
+            thread = threading.Thread(
+                target=self._async_order_worker, name="bigqmt-async-order", daemon=True
+            )
+            self._async_order_thread = thread
+            thread.start()
+
+    def _run_async_order(self, seq, args, kwargs):
+        """Do the actual submit and fire the matching callback. Worker thread."""
         stock_code = str(kwargs.get("stock_code") or (args[1] if len(args) > 1 else ""))
+        callback = self.callback
         try:
-            result = self.order_stock(*args, **kwargs)
+            # wait_settlement=False: return as soon as passorder ran. The order
+            # id arrives via order_callback, which is what MiniQMT does too.
+            result = self.order_stock_result(*args, wait_settlement=False, **kwargs)
         except Exception as exc:
-            callback = self.callback
             if callback is not None:
                 try:
                     callback.on_order_error(
@@ -2121,19 +2166,25 @@ class BigQmtXtTrader:
                             order_sys_id="",
                             order_id="",
                             stock_code=stock_code,
+                            seq=seq,
                         )
                     )
                 except Exception:
                     pass
-            return seq
-        # MiniQMT: order_stock returns -1 when the order failed to submit.
-        # NOTE: the server also pushes an order_error event for 废单 (via
-        # exec_events), so a client may see this -1 error AND the server's
-        # order_error — they carry different info (RPC submit failure vs QMT
-        # rejection detail). We fire it only when the callback was registered,
-        # keeping both signals available to the client.
-        if isinstance(result, int) and result == -1:
-            callback = self.callback
+            return
+
+        order_sys_id = ""
+        user_order_id = ""
+        if isinstance(result, dict):
+            order_sys_id = str(result.get("order_sys_id") or result.get("order_sysid") or "")
+            user_order_id = str(result.get("user_order_id") or "")
+        elif result is not None:
+            order_sys_id = str(result)
+
+        # order_stock returns -1 when the submit itself failed. The server also
+        # pushes an order_error for a 废单; the two carry different information
+        # (RPC submit failure vs QMT rejection detail), so both stay available.
+        if order_sys_id == "-1" or result == -1:
             if callback is not None:
                 try:
                     callback.on_order_error(
@@ -2143,22 +2194,24 @@ class BigQmtXtTrader:
                             order_sys_id="",
                             order_id="",
                             stock_code=stock_code,
+                            seq=seq,
                         )
                     )
                 except Exception:
                     pass
-            return seq
-        callback = self.callback
+            return
+
         if callback is not None:
             try:
-                # Align with native XtOrderResponse: callback takes ONE arg
-                # (response) carrying account_id/order_id/seq/error_msg.
-                order_sys_id = str(result.get("order_sys_id") or result.get("order_sysid") or "") if isinstance(result, dict) else str(result)
+                # Native XtOrderResponse shape: one argument carrying
+                # account_id/order_id/seq/error_msg. order_id may be empty here
+                # -- the id is assigned asynchronously and lands in the
+                # order_callback push (issue #50).
                 callback.on_order_stock_async_response(
                     CompatObject(
                         account_id=self.client.account_id,
                         seq=seq,
-                        order_id=order_sys_id or str(result.get("user_order_id") or "") if isinstance(result, dict) else str(result),
+                        order_id=order_sys_id or user_order_id,
                         order_sys_id=order_sys_id,
                         stock_code=stock_code,
                         strategy_name=str(kwargs.get("strategy_name") or (args[6] if len(args) > 6 else "")),
@@ -2168,7 +2221,40 @@ class BigQmtXtTrader:
                 )
             except Exception:
                 pass
+
+    def order_stock_async(self, *args, **kwargs):
+        """Queue an order and return its seq immediately (MiniQMT semantics).
+
+        This used to call order_stock inline, so it blocked for the full RPC
+        round trip plus -- after the issue #44 change -- however long the server
+        waited for QMT to assign an order id. That is 0.5-1s per order, which
+        defeats the point of an async API (issue #50).
+
+        Now the submit runs on a worker thread and the outcome arrives through
+        on_order_stock_async_response / on_order_error, both carrying the seq so
+        callers can correlate. Returns the seq without touching the network.
+        """
+        seq = self._next_async_seq()
+        self._ensure_async_order_worker()
+        self._async_order_queue.put((seq, args, kwargs))
         return seq
+
+    def wait_async_orders(self, timeout=10.0):
+        """Block until every queued async order has been submitted.
+
+        For tests and for shutdown; the API itself is fire-and-forget. Returns
+        False on timeout rather than hanging. Uses task_done bookkeeping, so it
+        waits for the in-flight job too, not merely for the queue to drain.
+        """
+        queue_obj = getattr(self, "_async_order_queue", None)
+        if queue_obj is None:
+            return True
+        deadline = time.time() + float(timeout)
+        while queue_obj.unfinished_tasks:
+            if time.time() > deadline:
+                return False
+            time.sleep(0.005)
+        return True
 
     def order_stock_batch(self, account, orders, batch_id=""):
         account_id = _account_id(account, self.client.account_id)
