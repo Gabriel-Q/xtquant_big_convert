@@ -224,6 +224,39 @@ BIGQMT_REDIS_CONFIG = {
 所以连不上 58600 的客户端行为与改动前完全一致。BSON 编解码内置了无依赖实现（可选用
 pymongo 的 `bson`，两者输出实测逐字节一致），客户端不需要额外装包。
 
+### QMT 启停 / 自动重启（qmt_launcher）
+
+大 QMT 基本每天早上要重启一次，卡点在登录框。两条路绕过它：
+
+```bash
+python -m bigqmt_signal_trader.qmt_launcher status  --dir "D:\国金证券QMT交易端_lemo"
+python -m bigqmt_signal_trader.qmt_launcher restart --dir "D:\国金证券QMT交易端_lemo"
+```
+
+| mode | 做什么 | 需要登录框交互 |
+|------|--------|---------------|
+| `linkmini`（默认优先）| `XtMiniQmt.exe linkMini`，MiniQMT 免密启动 | 否 |
+| `bat` | 跑指定批处理（如 `免密登录qmt.bat`）| 否 |
+| `exe` | 直接起 `XtItClient.exe`，靠终端自身恢复会话 | 否 |
+| `login` | 起 exe 后向登录框输入账号密码 | 是，需 pywin32 |
+
+**关于「pywinauto/pyautogui 要求 Windows 处于登录状态」**：`login` 模式用的是
+`win32api.SendMessage` 直接投递到窗口句柄，不是 pyautogui 那种按屏幕坐标重放物理输入。
+前者不要求窗口置于前台，锁屏下也能工作（会话还在即可，完全注销则不行）。密码从
+环境变量 `BIGQMT_LOGIN_USER` / `BIGQMT_LOGIN_PASSWORD` 读，不走命令行参数——argv
+对同机任何进程可见。
+
+两个设计要点：
+
+- **按安装目录隔离**。同机常并行跑多个 QMT，`taskkill /im XtItClient.exe` 会误杀别人的
+  实盘。这里只终结 `--dir` 对应 `bin.x64` 下的进程；拿不到 exe 路径的进程直接跳过而不是
+  猜。
+- **等就绪而不是 sleep 固定秒数**。启动完成的判据是 FormulaServer 端口（58600）能接受连接，
+  超时抛 `QmtLauncherError` 而不是静默返回，避免定时任务在没起来的终端上继续跑。
+
+`restart` 默认在关闭后等 5 秒再启动：ZMQ 传输是精确绑定配置端口（不扫描），socket 没
+完全释放就重启会绑定失败。
+
 ### 独立 ZMQ 回测桥接
 
 `bigqmt_backtest` 与实盘 RPC 桥接完全分离，提供两个明确隔离的后端：
