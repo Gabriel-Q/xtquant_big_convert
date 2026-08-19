@@ -224,14 +224,42 @@ class AdjustedDownloadTest(unittest.TestCase):
         self.assertEqual(raw_call["period"], "1d")
         self.assertEqual(raw_call["start_time"], "20200101")
 
-    def test_none_download_skips_server_side_raw_download(self):
+    def test_none_download_still_triggers_server_side_download(self):
+        """issue #47: an unadjusted download used to skip the server RPC and
+        only read what Big QMT already had -- a no-op that still reported
+        {finished: N}. xtdata semantics are "populate the local QMT store", and
+        callers (FormulaServer, get_local_data) depend on that actually happening."""
         xt = self._xt()
         xt.download_history_data2(["600000.SH"], "1d", dividend_type="none")
 
-        # Unadjusted pulls need no server-side download.
         method_calls = [m for m, _ in xt.client.call_params]
-        self.assertNotIn("download_history_data2", method_calls)
+        self.assertIn("download_history_data2", method_calls)
         self.assertIn("get_market_data_ex", method_calls)
+        self.assertLess(
+            method_calls.index("download_history_data2"),
+            method_calls.index("get_market_data_ex"),
+            "the download must precede the pull, or the pull reads stale data",
+        )
+        raw_call = next(p for m, p in xt.client.call_params if m == "download_history_data2")
+        self.assertEqual(raw_call["stock_list"], ["600000.SH"])
+        self.assertEqual(raw_call["period"], "1d")
+
+    def test_none_download_survives_server_download_failure(self):
+        """Same best-effort contract the adjusted path already had: a deployment
+        without the QMT global must still get its bars."""
+        xt = self._xt()
+        original_call = xt.client.call
+
+        def failing_download(method, params=None, account_id=None, timeout_seconds=None):
+            if method == "download_history_data2":
+                raise RuntimeError("global not available")
+            return original_call(method, params, account_id=account_id, timeout_seconds=timeout_seconds)
+
+        xt.client.call = failing_download
+        result = xt.download_history_data2(["600000.SH"], "1d", dividend_type="none")
+
+        self.assertEqual(result["finished"], 1)
+        self.assertIn("get_market_data_ex", [m for m, _ in xt.client.call_params])
 
     def test_front_download_survives_server_download_failure(self):
         # Deployments without the QMT global must still get the adjusted pull
