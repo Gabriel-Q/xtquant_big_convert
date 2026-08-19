@@ -1141,6 +1141,47 @@ class DownloadHistoryDataTest(unittest.TestCase):
         # No global func and adapter lacks the method → returns False, not crash.
         self.assertFalse(result)
 
+    def test_download_history_data_falls_back_to_down_history_data(self):
+        # issue #54: QMT builds that only expose down_history_data must still work.
+        calls = []
+
+        def fake_down(stock_code, period, start_time, end_time):
+            calls.append((stock_code, period, start_time, end_time))
+            return True
+
+        handlers = self._handlers_with_qmt_global("down_history_data", fake_down)
+        result = handlers.handle("download_history_data", {
+            "stock_code": "600000.SH",
+            "period": "1d",
+            "start_time": "20260815",
+            "end_time": "20260819",
+        })
+        self.assertEqual(calls, [("600000.SH", "1d", "20260815", "20260819")])
+        self.assertTrue(result)
+
+    def test_download_history_data2_loops_per_code_with_single_stock_global(self):
+        # issue #54: no download_history_data2 global — fall back to a per-code
+        # loop over the single-stock global, dates included, so the requested
+        # range actually reaches QMT.
+        calls = []
+
+        def fake_down(stock_code, period, start_time, end_time):
+            calls.append((stock_code, period, start_time, end_time))
+            return True
+
+        handlers = self._handlers_with_qmt_global("down_history_data", fake_down)
+        result = handlers.handle("download_history_data2", {
+            "stock_list": ["600000.SH", "000001.SZ"],
+            "period": "1d",
+            "start_time": "20260815",
+            "end_time": "20260819",
+        })
+        self.assertEqual(calls, [
+            ("600000.SH", "1d", "20260815", "20260819"),
+            ("000001.SZ", "1d", "20260815", "20260819"),
+        ])
+        self.assertTrue(result)
+
 
 if __name__ == "__main__":
     unittest.main()

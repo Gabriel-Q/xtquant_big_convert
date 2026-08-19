@@ -224,6 +224,10 @@ _EXTRA_QMT_GLOBAL_FUNCS = (
     # must be captured here so the adapter can call them. Issue #32.
     "download_history_data",
     "download_history_data2",
+    # Some QMT builds expose only down_history_data (single stock, same 4-arg
+    # signature). Issue #54: without it the download RPC is a silent no-op and
+    # reads only ever return the latest day.
+    "down_history_data",
 )
 
 

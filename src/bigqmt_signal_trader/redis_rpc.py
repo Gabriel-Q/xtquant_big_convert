@@ -816,6 +816,9 @@ class BigQmtRpcHandlers:
         xtdata SDK then ContextInfo).
         """
         func = self.qmt_api.get("download_history_data")
+        # Some QMT builds only expose down_history_data (same signature, 4 args).
+        if func is None:
+            func = self.qmt_api.get("down_history_data")
         if func is not None:
             try:
                 stock_code = str(params.get("stock_code") or "")
@@ -838,14 +841,20 @@ class BigQmtRpcHandlers:
 
         Native signature includes an optional callback for progress; the QMT
         global may require it, so pass a no-op when the client didn't.
+
+        Some QMT builds expose only the single-stock download globals
+        (``download_history_data`` / ``down_history_data``) — fall back to a
+        per-code loop with those. Without this the RPC returned False and
+        nothing was downloaded, so reads only ever saw the latest day
+        (issue #54).
         """
+        stock_list = list(params.get("stock_list") or [])
+        period = str(params.get("period") or "1d")
+        start_time = str(params.get("start_time") or "")
+        end_time = str(params.get("end_time") or "")
         func = self.qmt_api.get("download_history_data2")
         if func is not None:
             try:
-                stock_list = list(params.get("stock_list") or [])
-                period = str(params.get("period") or "1d")
-                start_time = str(params.get("start_time") or "")
-                end_time = str(params.get("end_time") or "")
                 # Try with a no-op callback first (some QMT builds require it);
                 # fall back to 4-arg call if that raises TypeError.
                 try:
@@ -855,6 +864,15 @@ class BigQmtRpcHandlers:
                 return bool(result) if result is not None else True
             except Exception as exc:
                 raise RuntimeError("download_history_data2 failed: %s" % exc)
+        single = self.qmt_api.get("download_history_data") or self.qmt_api.get("down_history_data")
+        if single is not None:
+            try:
+                result = None
+                for code in stock_list:
+                    result = single(code, period, start_time, end_time)
+                return bool(result) if result is not None else True
+            except Exception as exc:
+                raise RuntimeError("download_history_data2 per-code fallback failed: %s" % exc)
         try:
             return self._handle_market_data_method("download_history_data2", params)
         except (NotImplementedError, AttributeError):
