@@ -2193,19 +2193,31 @@ class BigQmtXtTrader:
             return
         self._order_barrier()
         with self._async_barrier_lock:
+            # remark 不强制唯一(网格类策略常复用同一 remark)。同 remark 的上一笔
+            # 可能还扣着暂存事件, 直接覆盖会把它们永久丢掉——丢事件比顺序错乱
+            # 更糟, 所以接管旧 entry 并在锁外放行它的事件。
+            superseded = self._async_barrier.pop(remark, None)
             self._async_barrier[remark] = {
                 "seq": seq,
                 "sys_ids": set(),
                 "events": [],
                 "deadline": time.time() + self.ASYNC_BARRIER_TIMEOUT_SECONDS,
             }
+        for event in (superseded or {}).get("events", []):
+            self._deliver_event(event)
 
-    def _release_order_barrier(self, remark):
+    def _release_order_barrier(self, remark, seq=None):
         """response 已触发, 按到达顺序放行暂存的事件。"""
         if not remark:
             return
         self._order_barrier()
         with self._async_barrier_lock:
+            entry = self._async_barrier.get(remark)
+            if entry is None:
+                return
+            if seq is not None and entry["seq"] != seq:
+                # 同 remark 的后一笔委托已接管屏障; 前一笔的 response 不该放它。
+                return
             entry = self._async_barrier.pop(remark, None)
         for event in (entry or {}).get("events", []):
             self._deliver_event(event)
@@ -2271,7 +2283,7 @@ class BigQmtXtTrader:
                     )
                 except Exception:
                     pass
-            self._release_order_barrier(remark)
+            self._release_order_barrier(remark, seq)
             return
 
         order_sys_id = ""
@@ -2300,7 +2312,7 @@ class BigQmtXtTrader:
                     )
                 except Exception:
                     pass
-            self._release_order_barrier(remark)
+            self._release_order_barrier(remark, seq)
             return
 
         if callback is not None:
@@ -2324,7 +2336,7 @@ class BigQmtXtTrader:
             except Exception:
                 pass
         # response 已触发 -> 放行这笔委托暂存的 order/trade (issue #51)。
-        self._release_order_barrier(remark)
+        self._release_order_barrier(remark, seq)
 
     def order_stock_async(self, *args, **kwargs):
         """Queue an order and return its seq immediately (MiniQMT semantics).

@@ -193,6 +193,33 @@ class AsyncCallbackOrderTest(unittest.TestCase):
 
         self.assertEqual(rec.names(), ["response", "order"])
 
+    def test_a_reused_remark_releases_the_previous_hold(self):
+        """Remarks are not unique (grid-style strategies reuse them). Arming a
+        second barrier on the same remark must release the first order's held
+        events rather than drop them -- losing events is worse than order.
+        And the second order's barrier must stay armed until ITS response."""
+        trader, rec, gate = self._trader()
+        self._submit(trader, remark="TAG-1")
+
+        # The first order's event arrives before its response and is held.
+        trader._dispatch_event(_event("order", remark="TAG-1", order_sys_id="sys-A"))
+        self.assertEqual(rec.names(), [])
+
+        # A second order reuses the remark; the held event must be released
+        # immediately instead of being discarded with the superseded barrier.
+        self._submit(trader, remark="TAG-1")
+        self.assertEqual(rec.names(), ["order"])
+
+        # The second order's own event still waits for ITS response: the
+        # first order's response must not release a barrier it does not own.
+        trader._dispatch_event(_event("order", remark="TAG-1", order_sys_id="sys-B"))
+        self.assertEqual(rec.names(), ["order"])
+
+        gate.set()
+        trader.wait_async_orders(timeout=5.0)
+
+        self.assertEqual(rec.names(), ["order", "response", "response", "order"])
+
 
 if __name__ == "__main__":
     unittest.main()
