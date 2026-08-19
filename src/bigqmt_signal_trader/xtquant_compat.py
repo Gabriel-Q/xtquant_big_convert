@@ -1860,6 +1860,19 @@ class BigQmtXtTrader:
             return
         if not isinstance(event, dict):
             return
+        # 放行超时的屏障, 再决定这条事件是直通还是暂存 (issue #51)。
+        try:
+            self._sweep_order_barriers()
+            if event.get("event_type") in ("order", "trade") and self._hold_if_pending(event):
+                return
+        except Exception:
+            pass  # 屏障故障绝不能吞掉事件
+        self._deliver_event(event)
+
+    def _deliver_event(self, event):
+        callback = self.callback
+        if callback is None:
+            return
         account_id = str(event.get("account_id") or self.client.account_id or "")
         try:
             event_type = event.get("event_type")
@@ -2148,9 +2161,96 @@ class BigQmtXtTrader:
             self._async_order_thread = thread
             thread.start()
 
+    # ------------------------------------------------------------------
+    # issue #51 A: 同一笔委托的 async_response 必须先于它的 order/trade 到达。
+    #
+    # 两条回调走的是不同线程和不同通道: async_response 在异步下单的工作线程上
+    # 触发, order/trade 来自 Redis pub/sub 监听线程。服务端在 order_callback
+    # 里先推事件再回 RPC, 所以顺序颠倒是常态而非偶发。
+    #
+    # 做法是给「已提交但尚未收到 async_response」的委托设一道屏障: 它的
+    # order/trade 事件先暂存, 等 response 触发后按到达顺序放行。延迟只加在
+    # 异步下单这一条路径上——手工下单、同步下单、以及任何未登记的委托一律直通。
+    # ------------------------------------------------------------------
+    ASYNC_BARRIER_TIMEOUT_SECONDS = 10.0
+
+    def _order_barrier(self):
+        barrier = getattr(self, "_async_barrier", None)
+        if barrier is None:
+            barrier = {}
+            self._async_barrier = barrier
+            self._async_barrier_lock = threading.Lock()
+        return barrier
+
+    @staticmethod
+    def _async_remark(args, kwargs):
+        """下单调用里的 order_remark —— 拿到 order_sys_id 之前唯一的关联键。"""
+        return str(kwargs.get("order_remark") or (args[7] if len(args) > 7 else "") or "")
+
+    def _arm_order_barrier(self, remark, seq):
+        """登记一笔待响应的委托。remark 为空则不设屏障(无从关联)。"""
+        if not remark:
+            return
+        self._order_barrier()
+        with self._async_barrier_lock:
+            self._async_barrier[remark] = {
+                "seq": seq,
+                "sys_ids": set(),
+                "events": [],
+                "deadline": time.time() + self.ASYNC_BARRIER_TIMEOUT_SECONDS,
+            }
+
+    def _release_order_barrier(self, remark):
+        """response 已触发, 按到达顺序放行暂存的事件。"""
+        if not remark:
+            return
+        self._order_barrier()
+        with self._async_barrier_lock:
+            entry = self._async_barrier.pop(remark, None)
+        for event in (entry or {}).get("events", []):
+            self._deliver_event(event)
+
+    def _sweep_order_barriers(self):
+        """放行超时未收到 response 的委托。
+
+        没有这一步, 一次失败的提交会把它的事件永久扣住——丢事件比顺序错乱更糟。
+        """
+        now = time.time()
+        expired = []
+        with self._async_barrier_lock:
+            for remark, entry in list(self._async_barrier.items()):
+                if now >= entry["deadline"]:
+                    expired.append(self._async_barrier.pop(remark))
+        for entry in expired:
+            for event in entry.get("events", []):
+                self._deliver_event(event)
+
+    def _hold_if_pending(self, event):
+        """属于待响应委托则暂存并返回 True, 否则返回 False 直通。"""
+        barrier = self._order_barrier()
+        if not barrier:
+            return False
+        remark = str(event.get("remark") or event.get("user_order_id") or "")
+        sys_id = str(event.get("order_sys_id") or "")
+        with self._async_barrier_lock:
+            entry = barrier.get(remark) if remark else None
+            if entry is None and sys_id:
+                # 成交事件可能没有 remark; 用委托事件里学到的 order_sys_id 关联。
+                for candidate in barrier.values():
+                    if sys_id in candidate["sys_ids"]:
+                        entry = candidate
+                        break
+            if entry is None:
+                return False
+            if sys_id:
+                entry["sys_ids"].add(sys_id)
+            entry["events"].append(event)
+            return True
+
     def _run_async_order(self, seq, args, kwargs):
         """Do the actual submit and fire the matching callback. Worker thread."""
         stock_code = str(kwargs.get("stock_code") or (args[1] if len(args) > 1 else ""))
+        remark = self._async_remark(args, kwargs)
         callback = self.callback
         try:
             # wait_settlement=False: return as soon as passorder ran. The order
@@ -2171,6 +2271,7 @@ class BigQmtXtTrader:
                     )
                 except Exception:
                     pass
+            self._release_order_barrier(remark)
             return
 
         order_sys_id = ""
@@ -2199,6 +2300,7 @@ class BigQmtXtTrader:
                     )
                 except Exception:
                     pass
+            self._release_order_barrier(remark)
             return
 
         if callback is not None:
@@ -2221,6 +2323,8 @@ class BigQmtXtTrader:
                 )
             except Exception:
                 pass
+        # response 已触发 -> 放行这笔委托暂存的 order/trade (issue #51)。
+        self._release_order_barrier(remark)
 
     def order_stock_async(self, *args, **kwargs):
         """Queue an order and return its seq immediately (MiniQMT semantics).
@@ -2235,6 +2339,8 @@ class BigQmtXtTrader:
         callers can correlate. Returns the seq without touching the network.
         """
         seq = self._next_async_seq()
+        # 屏障要在入队之前设好: 委托可能在本函数返回之前就被推送出来。
+        self._arm_order_barrier(self._async_remark(args, kwargs), seq)
         self._ensure_async_order_worker()
         self._async_order_queue.put((seq, args, kwargs))
         return seq
