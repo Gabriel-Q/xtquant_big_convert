@@ -114,6 +114,8 @@ seq = xt_trader.order_stock_async(acc, "600654.SH", 23, 100, 11, 2.95, "rpc_test
 | `on_cancel_error(err)` | 撤单失败 | ✅ |
 | `on_cancel_order_stock_async_response` | 异步撤单回报 | ✅ |
 
+**异步下单的事件顺序**（Issue #51）：`on_order_stock_async_response`（异步下单工作线程）与 `on_stock_order` / `on_stock_trade`（Redis pub/sub 监听线程）走不同通道，服务端在 `order_callback` 里先推事件、后回 RPC，事件先于响应是**常态**而非偶发竞态。客户端按 `order_remark` 设屏障：命中待响应委托的事件先暂存，response（或 error）触发后按到达顺序放行；屏障 10 秒超时兜底——丢事件比顺序错乱更糟。延迟只加在 `order_stock_async` 路径上：手工下单、同步下单、无 remark 的委托一律直通。成交事件可能没有 remark，此时按委托事件学到的 `order_sys_id` 关联。`order_remark` 不强制唯一（网格类策略常复用）：同 remark 的后一笔下单会接管前一笔的屏障并先放行其暂存事件，response 按 seq 精确匹配，前一笔的 response 不会误放后一笔的屏障。已验证：单测（含反向验证）+ 盘后真实 Redis 注入实测（部署环境保序成立）。
+
 **`*_async` 查询方法**（对齐 MiniQMT 签名，callback 可选）：
 
 ```python
