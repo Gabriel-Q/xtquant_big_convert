@@ -107,6 +107,37 @@ def _action_from_direction(direction):
     return ""
 
 
+def date_time_seconds(raw_date, raw_time):
+    """Combine a QMT date + time pair into Unix seconds; 0 when unavailable.
+
+    Official docs (dict.thinktrader.net, data_structure) leave the format of
+    m_strTradeDate/m_strTradeTime/m_strInsertDate/m_strInsertTime unspecified,
+    so tolerate the shapes seen in practice: date '20260819' or '2026-08-19',
+    time '093015', '09:30:15(.123)', or a full 'YYYY-MM-DD HH:MM:SS' carried
+    in the time field alone. Numeric timestamps pass through (ms normalized).
+    """
+    if isinstance(raw_time, (int, float)) and not isinstance(raw_time, bool):
+        value = float(raw_time)
+        if value > 1e11:  # ms epoch
+            value /= 1000.0
+        if value > 1e8:   # looks like an epoch, not HHMMSS
+            return int(value)
+
+    date_digits = "".join(ch for ch in str(raw_date or "") if ch.isdigit())
+    time_digits = "".join(ch for ch in str(raw_time or "") if ch.isdigit())
+    # Time field carrying its own date ('YYYYMMDDHHMMSS' or the dashed form).
+    if len(time_digits) >= 14:
+        date_digits, time_digits = time_digits[:8], time_digits[8:14]
+    if not date_digits or len(date_digits) < 8:
+        return 0
+    time_digits = (time_digits + "000000")[:6]  # pad to HHMMSS, drop ms
+    try:
+        parsed = time.strptime(date_digits[:8] + time_digits, "%Y%m%d%H%M%S")
+        return int(time.mktime(parsed))
+    except ValueError:
+        return 0
+
+
 def _is_buy(val):
     v = int(val)
     return v in _BUY_DIRECTIONS
@@ -319,6 +350,12 @@ def normalize_order_event(order, account_id=""):
         "remark": str(_attr(order, ["m_strRemark", "order_remark", "remark", "user_order_id"], "") or ""),
         "user_order_id": str(_attr(order, ["m_strRemark", "user_order_id", "order_remark", "remark"], "") or ""),
         "opt_name": str(_attr(order, ["m_strOptName", "opt_name"], "") or ""),
+        # 官方 Order 字段 m_strInsertDate+m_strInsertTime -> 真实报单 Unix 秒。
+        # 0 = 回调对象未携带 (老版本), 客户端会退回 created_at_ts。
+        "order_time": date_time_seconds(
+            _attr(order, ["m_strInsertDate", "m_strOrderDate", "insert_date", "order_date"]),
+            _attr(order, ["m_strInsertTime", "m_strOrderTime", "insert_time", "order_time"]),
+        ),
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "created_at_ts": time.time(),
     }
@@ -392,6 +429,12 @@ def normalize_trade_event(trade, account_id=""):
         # order_sys_id 关联。
         "remark": str(_attr(trade, ["m_strRemark", "order_remark", "remark", "user_order_id"], "") or ""),
         "user_order_id": str(_attr(trade, ["m_strRemark", "user_order_id", "order_remark", "remark"], "") or ""),
+        # 官方 Deal 字段 m_strTradeDate+m_strTradeTime -> 真实成交 Unix 秒。
+        # 0 = 未携带, 客户端会退回 created_at_ts。
+        "traded_time": date_time_seconds(
+            _attr(trade, ["m_strTradeDate", "trade_date", "m_strDealDate"]),
+            _attr(trade, ["m_strTradeTime", "trade_time", "traded_at"]),
+        ),
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "created_at_ts": time.time(),
     }

@@ -41,6 +41,22 @@ class FakeDeal:
     m_dComssion = 0.5
 
 
+class FakeDealWithOfficialDateTime:
+    """官方 Deal 字段: m_strTradeDate + m_strTradeTime 分离 (格式未注明,
+    按 QMT 惯例 'YYYYMMDD' / 'HHMMSS' 构造)。"""
+
+    m_strAccountID = "acct"
+    m_strInstrumentID = "600000.SH"
+    m_dPrice = 10.5
+    m_nVolume = 100
+    m_strTradeID = "T2"
+    m_strOrderSysID = "O2"
+    m_strTradeDate = "20260702"
+    m_strTradeTime = "100001"
+    m_nDirection = 48
+    m_dTradeAmount = 1050.0
+
+
 class FakeOrder:
     m_strAccountID = "acct"
     m_strInstrumentID = "000001.SZ"
@@ -53,6 +69,23 @@ class FakeOrder:
     strategyName = "s1"
     m_strRemark = "remark-1"
     m_strOptName = "限价买入"
+
+
+class FakeOrderWithInsertDateTime:
+    """官方 Order 字段: m_strInsertDate + m_strInsertTime (报单日期/时间)。"""
+
+    m_strAccountID = "acct"
+    m_strInstrumentID = "000001.SZ"
+    m_nOrderStatus = 50
+    m_nVolumeTotal = 200
+    m_nVolumeTraded = 50
+    m_dLimitPrice = 9.9
+    m_strOrderSysID = "O3"
+    m_nDirection = 49
+    strategyName = "s2"
+    m_strRemark = "remark-2"
+    m_strInsertDate = "20260702"
+    m_strInsertTime = "093000"
 
 
 class FakeRedis:
@@ -123,6 +156,18 @@ class ExecEventsServerTest(unittest.TestCase):
         self.assertEqual(ev["traded_at"], "2026-07-02 10:00:00")
         self.assertEqual(ev["commission"], 0.5)
 
+    def test_normalize_trade_event_emits_real_traded_time(self):
+        # 官方 Deal 字段 m_strTradeDate + m_strTradeTime -> 真实成交 Unix 秒。
+        ev = normalize_trade_event(FakeDealWithOfficialDateTime(), "acct")
+        expected = int(time.mktime(time.strptime("20260702100001", "%Y%m%d%H%M%S")))
+        self.assertEqual(ev["traded_time"], expected)
+
+    def test_normalize_trade_event_parses_datetime_shaped_trade_time(self):
+        # m_strTradeTime 也可能是 'YYYY-MM-DD HH:MM:SS' 完整日期时间 (无 TradeDate)。
+        ev = normalize_trade_event(FakeDeal(), "acct")
+        expected = int(time.mktime(time.strptime("2026-07-02 10:00:00", "%Y-%m-%d %H:%M:%S")))
+        self.assertEqual(ev.get("traded_time"), expected)
+
     def test_normalize_order_event_maps_thinktrader_fields(self):
         ev = normalize_order_event(FakeOrder(), "acct")
 
@@ -137,6 +182,12 @@ class ExecEventsServerTest(unittest.TestCase):
         self.assertEqual(ev["remark"], "remark-1")
         self.assertEqual(ev["user_order_id"], "remark-1")
         self.assertEqual(ev["opt_name"], "限价买入")
+
+    def test_normalize_order_event_emits_real_order_time(self):
+        # 官方 Order 字段 m_strInsertDate + m_strInsertTime -> 真实报单 Unix 秒。
+        ev = normalize_order_event(FakeOrderWithInsertDateTime(), "acct")
+        expected = int(time.mktime(time.strptime("20260702093000", "%Y%m%d%H%M%S")))
+        self.assertEqual(ev["order_time"], expected)
 
     def test_order_event_fills_strategy_from_remark_identity(self):
         class CallbackOrder:
