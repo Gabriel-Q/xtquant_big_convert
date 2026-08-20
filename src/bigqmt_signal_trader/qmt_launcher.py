@@ -9,13 +9,13 @@ it cannot simply be dropped into a scheduler. Two ways past it:
   ``免密登录qmt.bat`` does. No UI automation, so nothing here depends on a
   desktop being visible.
 * **Credential entry** -- for the full terminal (``XtItClient.exe``) the dialog
-  is unavoidable. We drive it with ``win32api.SendMessage`` posted straight to
-  the window handle, NOT with pyautogui/pywinauto. That distinction is the
-  answer to the question in issue #45: pyautogui replays physical input at
-  screen coordinates, so it needs the window focused and the desktop unlocked;
-  SendMessage delivers to a handle and works on a background -- or locked --
-  session, as long as the session still exists (an RDP disconnect is fine, a
-  full logout is not).
+  is unavoidable. We drive it with PHYSICAL input (``keybd_event`` /
+  ``mouse_event`` over ctypes), not ``SendMessage``: message-based typing never
+  reaches the focused control of a Qt dialog when another window holds the
+  foreground, so it silently no-ops. Physical input requires the dialog on top,
+  which we enforce (Alt-unlock + topmost + foreground) and verify before
+  typing anything. Needs an unlocked interactive session -- a locked desktop
+  or RDP logout is out of scope.
 
 Everything is scoped to one install directory. A machine here runs several QMT
 copies side by side, so an unscoped ``taskkill /im XtItClient.exe`` would take
@@ -337,11 +337,23 @@ def open_qmt(install_dir, mode="auto", bat_path=None, exe_name=None,
 
 
 def _login_via_window(credentials, window_title_prefix=None, appear_timeout_seconds=90.0):
-    """Type credentials into the QMT login dialog via SendMessage.
+    """Type credentials into the QMT login dialog.
 
     Matches the window by title PREFIX. The reference implementation pinned the
     full title including a build number ("国金证券QMT交易端 1.0.0.29456"), which
     stops finding the window on the next terminal update.
+
+    Input is delivered as PHYSICAL input (keybd_event/mouse_event), not
+    SendMessage: a background process's SendMessage does not reach the focused
+    control of a Qt dialog, which is why purely message-based typing silently
+    no-ops when anything else holds the foreground. Physical input needs the
+    dialog to be actually on top, so we first unlock the foreground lock (the
+    Alt-key trick), raise the window, and refuse to type if another window is
+    still covering it.
+
+    Verified live against 国金 QMT 2.1.19 (2026-08-20). Dialog field offsets
+    are fractions of the window size, so they survive the dialog being moved
+    or the broker build changing its absolute placement.
     """
     user = str(credentials.get("user") or credentials.get("account") or "")
     password = str(credentials.get("password") or "")
@@ -350,22 +362,24 @@ def _login_via_window(credentials, window_title_prefix=None, appear_timeout_seco
             "mode='login' needs credentials={'user':..., 'password':...}"
         )
     try:
-        import win32api
         import win32con
         import win32gui
     except ImportError:
         raise QmtLauncherError(
-            "mode='login' needs pywin32 (pip install pywin32); "
-            "prefer mode='linkmini' or mode='bat', which need no UI automation"
+            "mode='login' needs pywin32 (pip install pywin32)"
         )
+    import ctypes
 
+    user32 = ctypes.windll.user32
     prefix = str(window_title_prefix or "QMT")
 
     def _collect(hwnd, acc):
         if not win32gui.IsWindowVisible(hwnd):
             return
         title = win32gui.GetWindowText(hwnd) or ""
-        if title.strip().startswith(prefix):
+        cls = win32gui.GetClassName(hwnd)
+        # Qt5QWindowIcon 限定：避免把标题前缀相近的资源管理器等窗口当成登录框。
+        if cls == "Qt5QWindowIcon" and title.strip().startswith(prefix):
             acc.append(hwnd)
 
     def _find():
@@ -376,9 +390,15 @@ def _login_via_window(credentials, window_title_prefix=None, appear_timeout_seco
     deadline = time.time() + appear_timeout_seconds
     handle = None
     while time.time() < deadline:
-        handle = _find()
-        if handle:
-            break
+        candidate = _find()
+        if candidate:
+            r = win32gui.GetWindowRect(candidate)
+            if (r[2] - r[0]) < 800 and (r[3] - r[1]) < 600:
+                handle = candidate
+                break
+            # 大窗 = 主界面已出现：终端自动登录了，无需输入凭据，直接跳过。
+            log.info("main window already up (auto-login); skipping credentials")
+            return
         time.sleep(2.0)
     if not handle:
         raise QmtLauncherError(
@@ -386,24 +406,78 @@ def _login_via_window(credentials, window_title_prefix=None, appear_timeout_seco
             % (prefix, appear_timeout_seconds)
         )
 
-    def _send_text(text):
+    # 解锁前台保护并置顶：不验证可见性就打字，密码会落进遮挡窗口（实盘踩过坑）。
+    user32.keybd_event(0x12, 0, 0, 0)   # Alt down — unlocks SetForegroundWindow
+    user32.keybd_event(0x12, 0, 2, 0)   # Alt up
+    time.sleep(0.2)
+    win32gui.SetWindowPos(handle, win32con.HWND_TOPMOST, 0, 0, 0, 0,
+                          win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW)
+    win32gui.ShowWindow(handle, win32con.SW_RESTORE)
+    user32.SetForegroundWindow(handle)
+    time.sleep(0.8)
+    if user32.GetForegroundWindow() != handle:
+        raise QmtLauncherError(
+            "could not foreground the login dialog; another window would receive "
+            "the password. Close covering windows and retry."
+        )
+
+    def _looks_like_login_dialog():
+        # 登录框是小窗（国金 2.1.19 为 ~624x443）；主界面是大窗/最大化。
+        # 自动登录完成时找到的会是主界面——打字会落进主窗口控件，必须跳过。
+        r = win32gui.GetWindowRect(handle)
+        return (r[2] - r[0]) < 800 and (r[3] - r[1]) < 600
+
+    if not _looks_like_login_dialog():
+        log.info("window is already the main interface (auto-login); skipping credentials")
+        return
+
+    # 国金 2.1.19 登录框（624x443）控件的相对位置，按比例适配尺寸变化。
+    rect = win32gui.GetWindowRect(handle)
+    wx, wy = rect[0], rect[1]
+    w = max(rect[2] - rect[0], 1)
+    h = max(rect[3] - rect[1], 1)
+    account_xy = (0.68 * w, 0.57 * h)
+    password_xy = (0.48 * w, 0.63 * h)  # 避开右侧虚拟键盘图标
+    login_xy = (0.40 * w, 0.79 * h)
+
+    def _click(fx, fy):
+        user32.SetCursorPos(wx + int(fx), wy + int(fy))
+        time.sleep(0.15)
+        user32.mouse_event(0x0002, 0, 0, 0, 0)  # LEFTDOWN
+        time.sleep(0.05)
+        user32.mouse_event(0x0004, 0, 0, 0, 0)  # LEFTUP
+        time.sleep(0.3)
+
+    def _key(vk):
+        user32.keybd_event(vk, 0, 0, 0)
+        time.sleep(0.03)
+        user32.keybd_event(vk, 0, 2, 0)
+        time.sleep(0.06)
+
+    def _type(text):
         for ch in str(text):
-            win32api.SendMessage(handle, win32con.WM_KEYDOWN, ord(ch), 0)
-            win32api.SendMessage(handle, win32con.WM_KEYUP, ord(ch), 0)
+            _key(ord(ch))
+
+    def _select_all():
+        # 账号可能已预填：直接打字会变成追加。先 Ctrl+A 全选再覆盖。
+        user32.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
+        user32.keybd_event(ord("A"), 0, 0, 0)
+        user32.keybd_event(ord("A"), 0, 2, 0)
+        user32.keybd_event(win32con.VK_CONTROL, 0, 2, 0)
         time.sleep(0.2)
 
-    def _send_enter():
-        win32api.SendMessage(handle, win32con.WM_KEYDOWN, win32con.VK_RETURN, 0)
-        win32api.SendMessage(handle, win32con.WM_KEYUP, win32con.VK_RETURN, 0)
-        time.sleep(1.0)
-
     # Never log the values themselves.
-    log.info("entering credentials into window %r", prefix)
-    _send_text(user)
-    _send_enter()
-    _send_text(password)
-    _send_enter()
-    _send_enter()
+    log.info("entering credentials into window %r (physical input)", prefix)
+    _click(*account_xy)
+    _select_all()
+    _type(user)
+    _click(*password_xy)
+    _type(password)
+    if not _looks_like_login_dialog():
+        # 自动登录在打字过程中已完成——对话框已关闭，别再点"登录"坐标。
+        log.info("login dialog gone mid-entry (auto-login completed); skipping submit click")
+        return
+    _click(*login_xy)
 
 
 def restart_qmt(install_dir, settle_seconds=5.0, **open_kwargs):

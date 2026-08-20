@@ -2,6 +2,15 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
+## [Unreleased]
+
+### 修复
+
+- **qmt_launcher mode=login 打不进密码**：SendMessage 把键消息发给顶层窗口，但 Qt 对话框只在窗口持前台焦点时才把按键路由给输入框——后台进程发送等于静默丢弃。改为物理输入（keybd_event/mouse_event）：Alt 键解锁前台保护 → 置顶 + 前置 → 物理点击字段 → 打字。账号预填时先 Ctrl+A 再覆盖（否则变成追加）；密码框点击位置避开右侧虚拟键盘图标；控件坐标按窗口尺寸比例定位。已是大窗（主界面=自动登录完成）时跳过整个输入流程，避免密码打进主窗口控件。
+- **登录框就绪判定**：58600 端口在登录前就监听，launcher 的端口就绪不等于"已登录可用"——docstring 已注明，建议以 RPC ping 为真正就绪信号。
+
+---
+
 ## [0.2.3] - 2026-08-19
 
 ### 修复
