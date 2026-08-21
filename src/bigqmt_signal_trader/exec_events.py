@@ -376,6 +376,13 @@ def normalize_order_event(order, account_id=""):
         "remark": str(_attr(order, ["m_strRemark", "order_remark", "remark", "user_order_id"], "") or ""),
         "user_order_id": str(_attr(order, ["m_strRemark", "user_order_id", "order_remark", "remark"], "") or ""),
         "opt_name": str(_attr(order, ["m_strOptName", "opt_name"], "") or ""),
+        # 委托状态描述。官方字段表: m_strCancelInfo=废单原因, m_strErrorMsg=状态信息。
+        # 柜台的拒单理由 ("[COUNTER] 资金可用余额不足，尚需[...]") 只在这里,
+        # 此前完全没有透传, 客户端看到的是一个没有原因的失败 (issue #60)。
+        "status_msg": str(
+            _attr(order, ["m_strCancelInfo", "m_strErrorMsg", "m_strStatusMsg",
+                          "status_msg", "error_msg"], "") or ""
+        ),
         # 官方 Order 字段 m_strInsertDate+m_strInsertTime -> 真实报单 Unix 秒。
         # 0 = 回调对象未携带 (老版本), 客户端会退回 created_at_ts。
         "order_time": date_time_seconds(
@@ -506,7 +513,13 @@ def normalize_order_error_event(order_error, account_id=""):
         "stock_code": str(_attr(order_error, ["m_strInstrumentID", "stock_code"], "") or ""),
         "order_sys_id": str(_attr(order_error, ["m_strOrderSysID", "order_sys_id", "order_sysid", "order_id"], "") or ""),
         "error_id": _attr(order_error, ["m_nErrorID", "error_id", "m_nOrderStatus"]),
-        "error_msg": str(_attr(order_error, ["m_strErrorMsg", "error_msg", "m_strMsg"], "") or ""),
+        # m_strCancelInfo 排在最前: 官方字段表把它标为「废单原因」, 而柜台的
+        # 拒单理由 ("[COUNTER] 资金可用余额不足，尚需[...]") 正是走这个字段。
+        # 之前只读 m_strErrorMsg, 于是 error_msg 常常是空的 (issue #60)。
+        "error_msg": str(
+            _attr(order_error, ["m_strCancelInfo", "m_strErrorMsg", "error_msg",
+                                "m_strMsg", "m_strStatusMsg", "status_msg"], "") or ""
+        ),
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "created_at_ts": time.time(),
     }

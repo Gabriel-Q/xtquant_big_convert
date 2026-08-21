@@ -267,6 +267,7 @@ class OrderSnapshot:
         strategy_name="",
         remark="",
         order_time=0,
+        status_msg="",
     ):
         self.order_sys_id = order_sys_id
         self.user_order_id = user_order_id
@@ -281,6 +282,10 @@ class OrderSnapshot:
         # 报单时间, Unix 秒 -- MiniQMT XtOrder.order_time 的语义。0 = 未上报。
         # 追加在末尾并给默认值, 保持既有位置参数调用不受影响。
         self.order_time = order_time
+        # 委托状态描述 —— MiniQMT XtOrder.status_msg 的语义 (如废单原因)。
+        # 柜台的拒单理由只在这里, 例如
+        # "[COUNTER] 资金可用余额不足，尚需[4789.630]" (issue #60)。
+        self.status_msg = status_msg
 
 
 class TradeSnapshot:
