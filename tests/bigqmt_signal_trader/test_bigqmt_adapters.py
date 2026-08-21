@@ -87,6 +87,46 @@ class BigQmtAdaptersTest(unittest.TestCase):
         self.assertEqual(context.instrument_codes, ["000001.SZ"])
         self.assertEqual(instrument["InstrumentStatus"], 0)
 
+    def test_get_ticks_keys_keep_the_caller_case_for_futures(self):
+        """issue #58: futures instrument codes are lower-case ('rb2708.SF'), but
+        the keys came back upper-cased, so `code in result` failed for every
+        futures code and the book looked missing."""
+        class EchoContext:
+            def __init__(self):
+                self.tick_codes = []
+
+            def get_full_tick(self, codes):
+                self.tick_codes.append(list(codes))
+                return dict((c, {"lastPrice": 1.0}) for c in codes)
+
+        context = EchoContext()
+        provider = BigQmtMarketDataProvider(context)
+
+        ticks = provider.get_ticks(["rb2708.SF", "a2609.DF"])
+
+        # QMT is still asked in upper case...
+        self.assertEqual(context.tick_codes, [["RB2708.SF", "A2609.DF"]])
+        # ...but the caller gets its own spelling back.
+        self.assertEqual(sorted(ticks), ["a2609.DF", "rb2708.SF"])
+
+    def test_get_ticks_still_completes_the_suffix(self):
+        """Only case is restored. Completing '600000' to '600000.SH' is useful
+        normalization that callers depend on, so it must survive."""
+        context = FakeContext()
+        provider = BigQmtMarketDataProvider(context)
+
+        self.assertIn("600000.SH", provider.get_ticks(["600000"]))
+
+    def test_get_ticks_passes_through_an_unrequested_key(self):
+        """Dropping a quote QMT volunteered would be worse than an odd key."""
+        class ExtraContext:
+            def get_full_tick(self, codes):
+                return {"RB2708.SF": {"lastPrice": 1.0}, "SURPRISE.SF": {"lastPrice": 2.0}}
+
+        ticks = BigQmtMarketDataProvider(ExtraContext()).get_ticks(["rb2708.SF"])
+
+        self.assertEqual(sorted(ticks), ["SURPRISE.SF", "rb2708.SF"])
+
     def test_market_provider_passes_market_codes_to_full_tick(self):
         context = FakeContext()
         provider = BigQmtMarketDataProvider(context)

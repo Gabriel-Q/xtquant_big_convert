@@ -2757,6 +2757,8 @@ class BigQmtXtTrader:
             # created_at_ts 不发 order_time，所以没有显式 order_time 时
             # 用 created_at_ts 兜底；两者都没有才落到 0（不要当成 1970 年）。
             order_time=_safe_int(item.get("order_time") or item.get("created_at_ts"), 0),
+            # MiniQMT XtOrder.status_msg —— 废单时柜台给的原因 (issue #60)。
+            status_msg=str(item.get("status_msg") or ""),
         )
 
     def _trade_from_dict(self, account_id, item):

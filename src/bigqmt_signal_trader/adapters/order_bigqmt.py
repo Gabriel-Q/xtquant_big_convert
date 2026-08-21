@@ -51,6 +51,29 @@ def _report_missing_order_time(row):
     )
 
 
+# 委托状态描述。官方字段表 (docs/BIGQMT_INNER_PYTHON_API_REFERENCE.md):
+#   m_strCancelInfo  废单原因      <- 状态 57 时柜台的拒单理由在这里
+#   m_strErrorMsg    状态信息
+# 柜台消息形如 "[COUNTER] 资金可用余额不足，尚需[4789.630]"; 两个字段都空过,
+# 客户端就只能看到一个没有原因的失败 (issue #60)。废单原因优先, 它更具体。
+_STATUS_MSG_FIELDS = (
+    "m_strCancelInfo",
+    "m_strErrorMsg",
+    "m_strStatusMsg",
+    "status_msg",
+    "error_msg",
+)
+
+
+def _status_message(row):
+    for name in _STATUS_MSG_FIELDS:
+        value = _attr(row, (name,))
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
 def _order_time_seconds(row):
     """把 ORDER 行的报单日期+时间转成 Unix 秒, 拿不到返回 0。
 
@@ -204,6 +227,7 @@ class BigQmtOrderGateway:
                     strategy_name=str(_attr(row, ("m_strStrategyName", "strategy_name"), "") or ""),
                     remark=str(_attr(row, ("m_strRemark", "remark"), "") or ""),
                     order_time=_order_time_seconds(row),
+                    status_msg=_status_message(row),
                 )
             )
         return result
