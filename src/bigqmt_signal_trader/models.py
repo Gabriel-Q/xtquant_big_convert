@@ -285,7 +285,8 @@ class OrderSnapshot:
 
 class TradeSnapshot:
     def __init__(self, trade_id, order_sys_id, stock_code, action, volume, price,
-                 traded_at="", user_order_id=""):
+                 traded_at="", user_order_id="", amount=0.0, strategy_name="",
+                 traded_time=0):
         self.trade_id = trade_id
         self.order_sys_id = order_sys_id
         self.stock_code = stock_code
@@ -294,6 +295,13 @@ class TradeSnapshot:
         self.price = price
         self.traded_at = traded_at
         self.user_order_id = user_order_id
+        # 官方 Deal 字段 m_dTradeAmount(成交额) / m_strTradeDate+m_strTradeTime。
+        # 追加在末尾并给默认值, 保持既有位置参数调用不受影响 (同 OrderSnapshot.order_time)。
+        self.amount = amount
+        # strategy_name 是查询过滤参数 (仅委托/成交有效): 按策略过滤时返回集
+        # 必属该策略, 因此直接回填; 空策略名查全部时保持 ""。
+        self.strategy_name = strategy_name
+        self.traded_time = traded_time
 
 
 class OrderRef:

@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import unittest
 
 
@@ -251,6 +252,40 @@ class BigQmtAdaptersTest(unittest.TestCase):
         self.assertEqual(trades[0].action, "BUY")
         self.assertEqual(trades[0].volume, 100)
         self.assertEqual(trades[0].price, 54.76)
+
+    def test_query_trades_reads_official_deal_amount_time_and_strategy(self):
+        # 官方文档 (dict.thinktrader.net data_structure): Deal 对象含
+        # m_dTradeAmount(成交额)、m_strTradeDate+m_strTradeTime(成交日期/时间)、
+        # m_strRemark(投资备注, 即 passorder 的 userOrderId)。
+        def fake_query(account, account_type, detail_type, strategy_name):
+            return [
+                Obj(
+                    m_strTradeID="t-1",
+                    m_strOrderSysID="sys-1",
+                    m_strInstrumentID="600000",
+                    m_strExchangeID="SH",
+                    m_nOffsetFlag=49,
+                    m_nVolume=100,
+                    m_dPrice=10.5,
+                    m_dTradeAmount=1055.55,
+                    m_strTradeDate="20260820",
+                    m_strTradeTime="100001",
+                    m_strRemark="rmk-1",
+                )
+            ]
+
+        gateway = BigQmtOrderGateway(
+            context_info=object(),
+            get_trade_detail_data_func=fake_query,
+        )
+
+        trades = gateway.query_trades_strict("acct", "strat-a")
+
+        self.assertEqual(trades[0].amount, 1055.55)
+        expected_ts = time.mktime(time.strptime("20260820100001", "%Y%m%d%H%M%S"))
+        self.assertEqual(trades[0].traded_time, int(expected_ts))
+        # 按策略名过滤时返回集必属该策略 (官方: strategyName 仅对委托/成交查询有效)
+        self.assertEqual(trades[0].strategy_name, "strat-a")
 
     def test_factory_bigqmt_mode_wires_real_adapters(self):
         app = build_app(
