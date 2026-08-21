@@ -99,6 +99,26 @@ def _attr(obj, names, default=None):
     return default
 
 
+def _with_exchange_suffix(raw_code, obj):
+    """Append the exchange suffix to a bare instrument code.
+
+    Live order/deal callbacks carry ``m_strInstrumentID`` as the bare code
+    ('600000') while the exchange sits in ``m_strExchangeID`` — the same shape
+    ``get_trade_detail_data`` rows use. Native MiniQMT callback objects carry
+    the full '600000.SH' form, so events must match it. Codes that already
+    carry a suffix (or objects without exchange info) pass through unchanged.
+    """
+    text = str(raw_code or "")
+    if not text or "." in text:
+        return text
+    exchange = str(
+        _attr(obj, ["m_strExchangeID", "m_strMarketID", "exchange_id", "market"], "") or ""
+    ).strip().upper()
+    if exchange:
+        return "%s.%s" % (text, exchange)
+    return text
+
+
 def _action_from_direction(direction):
     if direction in _BUY_DIRECTIONS:
         return "BUY"
@@ -337,9 +357,15 @@ def normalize_order_event(order, account_id=""):
     return {
         "event_type": EVENT_ORDER,
         "account_id": str(_attr(order, ["m_strAccountID", "account_id"], account_id) or account_id or ""),
-        "stock_code": str(_attr(order, ["m_strInstrumentID", "stock_code", "m_strInstrument"], "") or ""),
+        "stock_code": _with_exchange_suffix(
+            _attr(order, ["m_strInstrumentID", "stock_code", "m_strInstrument"], ""), order
+        ),
         "order_sys_id": str(_attr(order, ["m_strOrderSysID", "order_sys_id", "order_sysid", "order_id"], "") or ""),
-        "order_volume": _attr(order, ["m_nVolumeTotal", "order_volume", "volume"]),
+        # MiniQMT XtOrder.order_volume is the ORIGINAL ordered volume; the
+        # remaining volume (m_nVolumeTotal) drops to 0 on the filled push.
+        "order_volume": _attr(
+            order, ["m_nVolumeTotalOriginal", "m_nVolumeTotal", "order_volume", "volume"]
+        ),
         "traded_volume": _attr(order, ["m_nVolumeTraded", "traded_volume"]),
         "price": _attr(order, ["m_dLimitPrice", "price", "limit_price"]),
         "status": _attr(order, ["m_nOrderStatus", "order_status", "status"]),
@@ -412,7 +438,9 @@ def normalize_trade_event(trade, account_id=""):
     return {
         "event_type": EVENT_TRADE,
         "account_id": str(_attr(trade, ["m_strAccountID", "account_id"], account_id) or account_id or ""),
-        "stock_code": str(_attr(trade, ["m_strInstrumentID", "stock_code"], "") or ""),
+        "stock_code": _with_exchange_suffix(
+            _attr(trade, ["m_strInstrumentID", "stock_code"], ""), trade
+        ),
         "order_sys_id": str(_attr(trade, ["m_strOrderSysID", "order_sys_id", "order_sysid", "order_id"], "") or ""),
         "trade_id": str(_attr(trade, ["m_strTradeID", "trade_id"], "") or ""),
         "volume": _attr(trade, ["m_nVolume", "volume", "traded_volume"]),

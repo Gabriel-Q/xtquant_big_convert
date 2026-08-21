@@ -544,6 +544,25 @@ def _is_hs_a_share(code):
     )
 
 
+def _full_a_share_code(code):
+    """Ensure a callback stock_code carries its exchange suffix.
+
+    Native MiniQMT XtOrder/XtTrade carry the full '600000.SH' form. Events from
+    an older server (or when the callback object exposes no exchange info) may
+    carry the bare 6-digit code; infer the suffix from the A-share code ranges
+    so consumers can key on the full form. Non-6-digit or already-suffixed
+    codes pass through unchanged.
+    """
+    text = str(code or "").strip().upper()
+    if "." in text or not (len(text) == 6 and text.isdigit()):
+        return text
+    if text.startswith(("600", "601", "603", "605", "688", "689")):
+        return text + ".SH"
+    if text.startswith(("000", "001", "002", "003", "300", "301")):
+        return text + ".SZ"
+    return text
+
+
 class BigQmtRpcClient:
     def __init__(
         self,
@@ -2724,7 +2743,7 @@ class BigQmtXtTrader:
         order_sysid = str(item.get("order_sys_id") or item.get("order_sysid") or item.get("order_id") or "")
         return CompatObject(
             account_id=account_id,
-            stock_code=str(item.get("stock_code") or ""),
+            stock_code=_full_a_share_code(item.get("stock_code")),
             order_type=order_type,
             order_status=_safe_int(item.get("status", item.get("order_status")), ORDER_UNKNOWN),
             order_volume=_safe_int(item.get("volume", item.get("order_volume"))),
@@ -2753,7 +2772,7 @@ class BigQmtXtTrader:
             amount = traded_price * traded_volume
         return CompatObject(
             account_id=account_id,
-            stock_code=str(item.get("stock_code") or ""),
+            stock_code=_full_a_share_code(item.get("stock_code")),
             order_type=order_type,
             order_sysid=order_sysid,
             order_id=order_sysid,
