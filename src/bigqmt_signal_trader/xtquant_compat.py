@@ -1999,7 +1999,7 @@ class BigQmtXtTrader:
         # 放行超时的屏障, 再决定这条事件是直通还是暂存 (issue #51)。
         try:
             self._sweep_order_barriers()
-            if event.get("event_type") in ("order", "trade") and self._hold_if_pending(event):
+            if event.get("event_type") in ("order", "trade", "order_error", "cancel_error") and self._hold_if_pending(event):
                 return
         except Exception:
             pass  # 屏障故障绝不能吞掉事件
