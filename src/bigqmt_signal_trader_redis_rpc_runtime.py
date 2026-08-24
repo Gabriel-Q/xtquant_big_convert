@@ -60,6 +60,9 @@ else:
 
 
 ACCOUNT_ID = ""
+# 账号类型：STOCK(股票) / CREDIT(信用/两融) / FUTURE(期货) / OPTION(期权)
+# 对应 xtconstant 枚举：SECURITY_ACCOUNT=2 / CREDIT_ACCOUNT=3 / FUTURE_ACCOUNT=1
+ACCOUNT_TYPE = "STOCK"
 REDIS_HOST = "127.0.0.1"
 REDIS_PORT = 6379
 REDIS_DB = 5
@@ -115,12 +118,21 @@ EXEC_EVENTS_ENABLED = True
 EXEC_EVENTS_DEBUG_RAW_FIELDS = False
 
 try:
+    # Keep optional account-type config backward compatible: an old local
+    # config without BIGQMT_ACCOUNT_TYPE must not discard the account ID or
+    # Redis settings that are present in that same module.
     from bigqmt_signal_trader_local_config import BIGQMT_ACCOUNT_ID, BIGQMT_REDIS_CONFIG
 except Exception:
     BIGQMT_ACCOUNT_ID = ""
     BIGQMT_REDIS_CONFIG = {}
+try:
+    from bigqmt_signal_trader_local_config import BIGQMT_ACCOUNT_TYPE
+except Exception:
+    BIGQMT_ACCOUNT_TYPE = "STOCK"
 
 ACCOUNT_ID = str(BIGQMT_ACCOUNT_ID or ACCOUNT_ID or "")
+# 账号类型：只从独立变量 BIGQMT_ACCOUNT_TYPE 读取，默认 STOCK
+ACCOUNT_TYPE = str(BIGQMT_ACCOUNT_TYPE or ACCOUNT_TYPE or "STOCK").strip().upper()
 REDIS_HOST = BIGQMT_REDIS_CONFIG.get("host", REDIS_HOST)
 REDIS_PORT = int(BIGQMT_REDIS_CONFIG.get("port", REDIS_PORT))
 REDIS_DB = int(BIGQMT_REDIS_CONFIG.get("db", REDIS_DB))
@@ -172,6 +184,7 @@ def _apply_config(account_id):
     configure(
         mode="bigqmt",
         account_id=account_id,
+        account_type=ACCOUNT_TYPE,
         position_sync_type="redis" if RPC_TRANSPORT in ("redis", "", "default") else "",
         enable_rpc=True,
         schedule_adjust=SCHEDULE_ADJUST_ENABLED,

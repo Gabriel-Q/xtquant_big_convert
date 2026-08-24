@@ -15,6 +15,7 @@ def normalize_stock_code(code):
     # these are native ContextInfo codes that need no normalization.
     _QMT_SUFFIXES = (
         ".SH", ".SZ", ".BJ", ".HK",           # Stock markets
+        ".HGT", ".SGT",                        # 港股通（沪/深）
         ".SHO", ".SZO",                        # Options markets (8-digit codes)
         ".SF", ".DF", ".IF", ".ZF", ".INE", ".GF",    # Futures markets
     )

@@ -11,6 +11,7 @@ from bigqmt_signal_trader.adapter_factory import build_app
 from bigqmt_signal_trader.adapters.market_bigqmt import BigQmtMarketDataProvider
 from bigqmt_signal_trader.adapters.order_bigqmt import BigQmtOrderGateway
 from bigqmt_signal_trader.adapters.position_bigqmt import BigQmtPositionProvider
+from bigqmt_signal_trader.adapters.position_bigqmt import _full_code
 from bigqmt_signal_trader.models import OrderRef, OrderRequest
 
 
@@ -75,6 +76,36 @@ class FakeMarketDataFallbackContext(FakeContext):
 
 
 class BigQmtAdaptersTest(unittest.TestCase):
+
+    def test_position_code_keeps_future_contract_code(self):
+        # A futures row always carries the XunTou-short exchange token, so a
+        # bare contract with an empty exchange is not futures -- normalize it
+        # and let an unrecognizable code raise as malformed.
+        with self.assertRaises(ValueError):
+            _full_code("EG2609", "")
+        with self.assertRaises(ValueError):
+            _full_code("IF2609", "")
+        self.assertEqual(_full_code("600000", "SH"), "600000.SH")
+
+    def test_futures_exchange_short_token_appends_suffix_and_preserves_case(self):
+        """Futures are classified by the exchange field (XunTou-short token),
+        which is appended as the suffix. The symbol keeps the exchange's exact
+        case (e.g. rb2401.SF lower, AP401.ZF upper) and must not be rewritten."""
+        self.assertEqual(_full_code("rb2401", "SF"), "rb2401.SF")   # SHFE lower-case
+        self.assertEqual(_full_code("AP401", "ZF"), "AP401.ZF")     # CZCE upper-case
+        self.assertEqual(_full_code("a2609", "DF"), "a2609.DF")     # DCE lower-case
+        self.assertEqual(_full_code("sc2401", "INE"), "sc2401.INE") # INE lower-case
+        self.assertEqual(_full_code("IF2609", "IF"), "IF2609.IF")   # CFFEX
+        self.assertEqual(_full_code("GF2609", "GF"), "GF2609.GF")   # GFEX
+
+    def test_futures_display_exchange_id_raises(self):
+        """A counter display ID (DCE/CFFEX/...) is an unexpected path: POSITION
+        rows normally carry the XunTou-short token (DF/SF/...), so this signals
+        a structure/vendor mismatch and must surface rather than degrade."""
+        for exchange in ("DCE", "CFFEX"):
+            with self.assertRaises(ValueError):
+                _full_code("EG2609", exchange)
+
     def test_market_provider_normalizes_codes_before_context_call(self):
         context = FakeContext()
         provider = BigQmtMarketDataProvider(context)
