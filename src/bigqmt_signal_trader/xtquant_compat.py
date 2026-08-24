@@ -2115,14 +2115,16 @@ class BigQmtXtTrader:
         available = _safe_int(item.get("available", item.get("can_use_volume")))
         cost = _safe_float(item.get("cost", item.get("avg_price")))
         price = _safe_float(item.get("price", item.get("last_price")), cost)
+        stock_code = str(item.get("stock_code") or "")
+        stock_name = str(item.get("stock_name") or "")
         market_value = item.get("market_value")
         if market_value is None:
             market_value = price * volume
         return CompatObject(
             account_type=2,
             account_id=account_id,
-            stock_code=str(item.get("stock_code") or ""),
-            stock_name=str(item.get("stock_name") or ""),
+            stock_code=stock_code,
+            stock_name=stock_name,
             volume=volume,
             can_use_volume=available,
             enable_amount=available,
