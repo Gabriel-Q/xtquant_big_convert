@@ -986,7 +986,15 @@ def _exec_event_redis(config):
         from bigqmt_signal_trader.adapters.redis_common import build_redis_client
 
         _exec_event_redis_client = build_redis_client(redis_config)
-    except Exception:
+    except Exception as exc:
+        # 静默 None 会让事件悄悄全丢（issue #71 的 protocol 崩溃就是这样没的），
+        # 必须留痕。
+        try:
+            from bigqmt_signal_trader.logging_setup import get_logger
+
+            get_logger("strategy").error("exec-event redis client build failed: %s", exc)
+        except Exception:
+            pass
         return None
     return _exec_event_redis_client
 

@@ -2,6 +2,14 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
+## [Unreleased]
+
+### 修复
+
+- **redis-py 3.5.3 兼容（PR #67 回归，Issue #71）**：`build_redis_client` 无条件传 `protocol=` 在 QMT 自带的老 redis-py 上直接 TypeError——且 QMT 策略重跑后执行事件发布器重建客户端时崩掉，事件被静默全丢（发布器构建失败现在会记日志，不再无声）。改为按版本能力（inspect.signature）条件透传；客户端 `_redis()` 同步处理。
+- **async_response 没有真实 order_id**（Issue #72）：委托号异步分配、RPC 应答时通常还没有，order_id 只能回落成 remark，按 order_id 管理委托的代码会解析失败。现在 response 触发前等屏障从暂存的委托事件里学到真实委托号（bounded 2s，学不到才回落 remark）。下单仍走 wait_settlement=False 快速应答（#50/#69 的吞吐不回退）。实盘验证：`async_response order_id=xt1090519419`（真实委托号）。
+- **#69 发单间隔**：0.5s 检查已在 #44 改为结算停放（不阻塞提交）——见 issue 回复，无需改动。
+
 ## [0.2.8] - 2026-08-25
 
 ### 修复

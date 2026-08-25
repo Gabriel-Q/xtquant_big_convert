@@ -697,11 +697,16 @@ class BigQmtRpcClient:
         if self.redis_client is None:
             import redis
 
+            from .adapters.redis_common import redis_supports_protocol_kw
+
             cfg = dict(self.redis_config)
             if not cfg.get("username"):
                 cfg.pop("username", None)
             if not cfg.get("password"):
                 cfg.pop("password", None)
+            if not redis_supports_protocol_kw():
+                # QMT 自带 redis-py 3.5.3 不认 protocol（issue #71）
+                cfg.pop("protocol", None)
             self.redis_client = redis.Redis(**cfg)
         return self.redis_client
 
@@ -2358,6 +2363,10 @@ class BigQmtXtTrader:
     # 异步下单这一条路径上——手工下单、同步下单、以及任何未登记的委托一律直通。
     # ------------------------------------------------------------------
     ASYNC_BARRIER_TIMEOUT_SECONDS = 10.0
+    # response 触发前等屏障从暂存的委托事件里学到委托号的上限（issue #72）。
+    # 委托号异步分配：推送通常比 RPC 应答快，几百毫秒内就能学到；超时则按
+    # 原样发 response（order_id 回落 remark），不拖住回调。
+    ASYNC_SYSID_WAIT_SECONDS = 2.0
 
     def _order_barrier(self):
         barrier = getattr(self, "_async_barrier", None)
@@ -2450,8 +2459,9 @@ class BigQmtXtTrader:
         remark = self._async_remark(args, kwargs)
         callback = self.callback
         try:
-            # wait_settlement=False: return as soon as passorder ran. The order
-            # id arrives via order_callback, which is what MiniQMT does too.
+            # wait_settlement=False：passorder 一返回就应答，不在 worker 里等
+            # 服务端结算（那是 #69 要的吞吐）。委托号从推送事件学——屏障暂存的
+            # 委托事件里会带上（触发 response 前至多等 2s，学不到就回落 remark）。
             result = self.order_stock_result(*args, wait_settlement=False, **kwargs)
         except Exception as exc:
             if callback is not None:
@@ -2507,9 +2517,24 @@ class BigQmtXtTrader:
         if callback is not None:
             try:
                 # Native XtOrderResponse shape: one argument carrying
-                # account_id/order_id/seq/error_msg. order_id may be empty here
-                # -- the id is assigned asynchronously and lands in the
-                # order_callback push (issue #50).
+                # account_id/order_id/seq/error_msg.
+                #
+                # 委托号异步分配（#50）：服务端应答时通常还没有。触发 response 前
+                # 先等屏障从暂存的委托事件里学到委托号（事件推送一般比 RPC 应答
+                # 快，bounded 2s），否则 order_id 只能回落成 remark，调用方按
+                # order_id 管理委托时会拿不到真实委托号（issue #72）。
+                if not order_sys_id and remark:
+                    wait_deadline = time.time() + self.ASYNC_SYSID_WAIT_SECONDS
+                    while time.time() < wait_deadline:
+                        learned = ""
+                        with self._async_barrier_lock:
+                            entry = self._async_barrier.get(remark)
+                            if entry and entry["sys_ids"]:
+                                learned = sorted(entry["sys_ids"])[0]
+                        if learned:
+                            order_sys_id = learned
+                            break
+                        time.sleep(0.05)
                 callback.on_order_stock_async_response(
                     CompatObject(
                         account_id=self.client.account_id,
