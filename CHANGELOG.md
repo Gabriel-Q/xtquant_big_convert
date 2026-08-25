@@ -2,6 +2,24 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
+## [0.2.8] - 2026-08-25
+
+### 修复
+
+- **期货持仓代码解析错误**（PR #68，@ReCodeLife）：裸期货合约（交易所字段为迅投简称 DF/SF/ZF）被错误送进股票归一化并抛 invalid stock code。改为**按交易所字段分类，不再猜代码形状**：迅投简称（IF/SF/DF/ZF/INE/GF）拼接后缀并**保留符号原始大小写**（`rb2401.SF` 小写 / `AP401.ZF` 大写，两者不可互换）；股票/港股通走归一化；`code_utils` 补 `.HGT` / `.SGT` 后缀识别。
+- **一行无法解析的数据会搞垮整个查询**（PR #70）：上一条让 `_full_code` 遇到柜台式交易所 ID 时抛异常——信号本身是对的，但三个调用方的行循环都没有逐行保护，异常会一路抛出 `get_positions` / `query_orders` / `query_trades`。**一行异常 = 整个持仓查不到**；而 `query_orders` 外层 `except` 返回 `[]`，丢的是全部委托。对交易系统而言这比它要报告的问题更危险，也与本模块「降级而非崩溃」的既定风格矛盾（POSITION 查询外的 try/except 注释即为 *degrade to empty*）。现在跳过解析不了的那一行、其余照常返回，跳过按 `(kind, exchange)` 只记一次日志。
+
+### 新增
+
+- **`BIGQMT_ACCOUNT_TYPE` 配置**（PR #68）：账号类型独立可配（默认 `STOCK`，另有 `CREDIT` / `FUTURE` / `OPTION`），`redis_rpc_runtime` 向后兼容读取并归一化为大写字符串后传入 `configure()`。旧配置不写此项时行为不变。
+
+### 已知限制
+
+- **#58 的期货小写代码仍缺实盘样本**：`get_full_tick(['rb2708.SF'])` 返回空，无法据此判断大小写还原是否生效（空结果说明该合约无数据，而非映射失败）。本版持仓侧的大小写保留由单测覆盖。
+- **单文件构建（#56）未进主干**：报告人提交的 `build_no_redis_single_file_flat.py` 依赖两个未附带的模块和 `bigqmt_no_redis/` 目录，尚不能独立运行；其惰性加载架构优于此前方案（PR #62 已关闭），待依赖补齐后合入。
+
+---
+
 ## [Unreleased]
 
 ### 新增
