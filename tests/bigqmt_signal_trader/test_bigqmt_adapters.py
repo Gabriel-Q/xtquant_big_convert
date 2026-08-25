@@ -425,3 +425,91 @@ class FinancialFieldTranslateTest(unittest.TestCase):
         self.assertEqual(calls[0][0], ["CustomTable"])
 
 
+
+
+class UnparsableRowIsolationTest(unittest.TestCase):
+    """A row _full_code cannot parse must cost that row, not the query.
+
+    PR #68 made _full_code raise on a counter-style futures exchange ID, which
+    is the right signal -- but every caller loops without per-row protection, so
+    one odd row turned "one position missing" into "no positions at all". For a
+    trading system that is the more dangerous failure.
+    """
+
+    class _Row(object):
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    def _rows(self):
+        return [
+            self._Row(m_strInstrumentID="600000", m_strExchangeID="SH",
+                      m_nVolume=100, m_nCanUseVolume=100,
+                      m_nVolumeTotalOriginal=100, m_nVolumeTraded=0,
+                      m_strTradeID="t1", m_nVolume_deal=1),
+            # Counter-style display ID -- _full_code raises on this one.
+            self._Row(m_strInstrumentID="rb2401", m_strExchangeID="SHFE",
+                      m_nVolume=1, m_nCanUseVolume=1,
+                      m_nVolumeTotalOriginal=1, m_nVolumeTraded=0,
+                      m_strTradeID="t2"),
+            self._Row(m_strInstrumentID="000001", m_strExchangeID="SZ",
+                      m_nVolume=200, m_nCanUseVolume=200,
+                      m_nVolumeTotalOriginal=200, m_nVolumeTraded=0,
+                      m_strTradeID="t3"),
+        ]
+
+    def setUp(self):
+        from bigqmt_signal_trader.adapters import position_bigqmt
+
+        position_bigqmt._unparsable_rows_reported.clear()
+
+    def test_positions_survive_one_unparsable_row(self):
+        from bigqmt_signal_trader.adapters.position_bigqmt import BigQmtPositionProvider
+
+        rows = self._rows()
+        provider = BigQmtPositionProvider(lambda a, t, d: rows if d == "POSITION" else [])
+
+        positions = provider.get_positions("acct")
+
+        self.assertEqual(sorted(positions), ["000001.SZ", "600000.SH"])
+
+    def test_orders_survive_one_unparsable_row(self):
+        from bigqmt_signal_trader.adapters.order_bigqmt import BigQmtOrderGateway
+
+        rows = self._rows()
+        gateway = BigQmtOrderGateway(
+            context_info=None, passorder_func=None, cancel_func=None,
+            get_trade_detail_data_func=lambda a, t, d, s="": rows if d == "ORDER" else [])
+
+        orders = gateway.query_orders("acct", "")
+
+        self.assertEqual(sorted(o.stock_code for o in orders), ["000001.SZ", "600000.SH"])
+
+    def test_trades_survive_one_unparsable_row(self):
+        from bigqmt_signal_trader.adapters.order_bigqmt import BigQmtOrderGateway
+
+        rows = self._rows()
+        gateway = BigQmtOrderGateway(
+            context_info=None, passorder_func=None, cancel_func=None,
+            get_trade_detail_data_func=lambda a, t, d, s="": rows if d == "DEAL" else [])
+
+        trades = gateway.query_trades("acct", "")
+
+        self.assertEqual(sorted(t.stock_code for t in trades), ["000001.SZ", "600000.SH"])
+
+    def test_the_skipped_row_is_reported_once(self):
+        import contextlib
+        import io as _io
+
+        from bigqmt_signal_trader.adapters.position_bigqmt import BigQmtPositionProvider
+
+        rows = self._rows()
+        provider = BigQmtPositionProvider(lambda a, t, d: rows if d == "POSITION" else [])
+        buffer = _io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            provider.get_positions("acct")
+            provider.get_positions("acct")
+        output = buffer.getvalue()
+
+        self.assertEqual(output.count("skipping unparsable"), 1)
+        self.assertIn("rb2401", output)
+        self.assertIn("SHFE", output)
