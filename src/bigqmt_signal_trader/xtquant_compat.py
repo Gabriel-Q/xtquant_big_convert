@@ -15,6 +15,7 @@ import importlib
 import datetime as _dt
 from typing import Any, Dict, Iterable, List, Optional
 from xtquant.xtconstant import *
+from xtquant.xttype import StockAccount
 
 from .full_tick_cache import request_full_tick_cache, wait_full_tick_cache
 from .local_cache import LocalMarketCache
@@ -60,10 +61,7 @@ class CompatObject:
         return "%s(%s)" % (self.__class__.__name__, items)
 
 
-class StockAccount:
-    def __init__(self, account_id, account_type="STOCK"):
-        self.account_id = str(account_id or "")
-        self.account_type = str(account_type or "STOCK")
+
 
 
 class XtQuantTraderCallback:
