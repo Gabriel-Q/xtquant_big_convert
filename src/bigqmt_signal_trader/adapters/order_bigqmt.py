@@ -8,7 +8,7 @@ import hashlib
 from ..code_utils import normalize_stock_code
 from ..exec_events import date_time_seconds
 from ..models import CancelResult, OrderSnapshot, OrderSubmitResult, SignalAction, TradeSnapshot
-from .position_bigqmt import _attr, _full_code
+from .position_bigqmt import _attr, _full_code, skip_unparsable_row
 
 
 PRICE_TYPE_ALIASES = {
@@ -211,14 +211,19 @@ class BigQmtOrderGateway:
         rows = query(account_id, self.account_type, "ORDER", strategy_name) or []
         result = []
         for row in rows:
+            try:
+                stock_code = _full_code(
+                    _attr(row, ("m_strInstrumentID", "instrument_id", "stock_code")),
+                    _attr(row, ("m_strExchangeID", "exchange_id", "market")),
+                )
+            except Exception as exc:
+                skip_unparsable_row("ORDER", row, exc)
+                continue
             result.append(
                 OrderSnapshot(
                     order_sys_id=str(_attr(row, ("m_strOrderSysID", "order_sys_id"), "") or ""),
                     user_order_id=str(_attr(row, ("m_strRemark", "user_order_id", "remark"), "") or ""),
-                    stock_code=_full_code(
-                        _attr(row, ("m_strInstrumentID", "instrument_id", "stock_code")),
-                        _attr(row, ("m_strExchangeID", "exchange_id", "market")),
-                    ),
+                    stock_code=stock_code,
                     action=_action_from_offset_flag(_attr(row, ("m_nOffsetFlag", "offset_flag"), 0)),
                     volume=int(_attr(row, ("m_nVolumeTotalOriginal", "volume"), 0) or 0),
                     traded_volume=int(_attr(row, ("m_nVolumeTraded", "traded_volume"), 0) or 0),
@@ -257,14 +262,19 @@ class BigQmtOrderGateway:
         result = []
         for row in rows:
             traded_at_raw = _attr(row, ("m_strTradeTime", "trade_time", "traded_at"), "")
+            try:
+                stock_code = _full_code(
+                    _attr(row, ("m_strInstrumentID", "instrument_id", "stock_code")),
+                    _attr(row, ("m_strExchangeID", "exchange_id", "market")),
+                )
+            except Exception as exc:
+                skip_unparsable_row("DEAL", row, exc)
+                continue
             result.append(
                 TradeSnapshot(
                     trade_id=str(_attr(row, ("m_strTradeID", "trade_id"), "") or ""),
                     order_sys_id=str(_attr(row, ("m_strOrderSysID", "order_sys_id"), "") or ""),
-                    stock_code=_full_code(
-                        _attr(row, ("m_strInstrumentID", "instrument_id", "stock_code")),
-                        _attr(row, ("m_strExchangeID", "exchange_id", "market")),
-                    ),
+                    stock_code=stock_code,
                     action=_action_from_offset_flag(_attr(row, ("m_nOffsetFlag", "offset_flag"), 0)),
                     volume=int(_attr(row, ("m_nVolume", "volume"), 0) or 0),
                     price=float(_attr(row, ("m_dPrice", "m_dTradePrice", "price"), 0.0) or 0.0),

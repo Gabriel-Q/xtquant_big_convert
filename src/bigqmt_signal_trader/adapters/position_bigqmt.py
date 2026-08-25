@@ -111,6 +111,34 @@ def _full_code(instrument_id, exchange_id):
     return normalize_stock_code(raw)
 
 
+# One unparsable row must not cost the whole query. _full_code raises on a
+# structure it does not recognise (a counter-style futures exchange ID, a
+# malformed bare code), and every caller loops over rows without per-row
+# protection -- so without this, a single odd row turns "one position missing"
+# into "no positions at all", which for a trading system is far worse.
+#
+# Reported once per (kind, exchange) so a persistently odd row does not flood
+# the QMT panel, while still naming what to look at.
+_unparsable_rows_reported = set()
+
+
+def skip_unparsable_row(kind, row, exc):
+    """Log an unparsable row once and let the caller skip it."""
+    exchange = ""
+    instrument = ""
+    try:
+        exchange = str(_attr(row, ("m_strExchangeID", "exchange_id", "market"), "") or "")
+        instrument = str(_attr(row, ("m_strInstrumentID", "instrument_id", "stock_code"), "") or "")
+    except Exception:
+        pass
+    key = (kind, exchange)
+    if key in _unparsable_rows_reported:
+        return
+    _unparsable_rows_reported.add(key)
+    print("[bigqmt_code] skipping unparsable %s row (instrument=%r exchange=%r): %s"
+          % (kind, instrument, exchange, exc))
+
+
 class BigQmtPositionProvider:
     def __init__(self, get_trade_detail_data_func, account_type="STOCK"):
         self.get_trade_detail_data = get_trade_detail_data_func
@@ -131,10 +159,14 @@ class BigQmtPositionProvider:
             return {}
         positions = {}
         for row in rows:
-            code = _full_code(
-                _attr(row, ("m_strInstrumentID", "instrument_id", "stock_code")),
-                _attr(row, ("m_strExchangeID", "exchange_id", "market")),
-            )
+            try:
+                code = _full_code(
+                    _attr(row, ("m_strInstrumentID", "instrument_id", "stock_code")),
+                    _attr(row, ("m_strExchangeID", "exchange_id", "market")),
+                )
+            except Exception as exc:
+                skip_unparsable_row("POSITION", row, exc)
+                continue
             positions[code] = PositionSnapshot(
                 stock_code=code,
                 volume=int(_attr(row, ("m_nVolume", "volume"), 0) or 0),
