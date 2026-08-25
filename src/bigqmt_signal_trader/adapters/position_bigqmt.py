@@ -61,14 +61,54 @@ def _report_missing_field(label, row, candidates):
     )
 
 
+# Big QMT reports an instrument's market as the 迅投简称 (XunTou short) token on
+# POSITION/ORDER/DEAL rows. The same token is appended as the ContextInfo code
+# suffix (a2609.DF, rb2401.SF, 000001.SZ, 00700.HGT).
+# Stock/mutual-fund/HK-Connect markets: case-insensitive, unified via normalize.
+_STOCK_EXCHANGE_TOKENS = frozenset({"SH", "SZ", "BJ", "HK", "HGT", "SGT"})
+# Futures XunTou-short exchange tokens: only concatenate the suffix. The symbol
+# must follow each exchange's canonical naming and is case-sensitive
+# (AP401.ZF upper-case / rb2401.SF lower-case, not interchangeable), so never
+# rewrite its case.
+_FUTURES_EXCHANGE_TOKENS = frozenset({"IF", "SF", "DF", "ZF", "INE", "GF"})
+# Counter-style (display) futures exchange IDs also seen on POSITION rows.
+# Their symbol carries no suffix; return the raw code as a stable key.
+_FUTURES_EXCHANGES = frozenset({
+    "SHFE", "DCE", "CZCE", "ZCE", "CFFEX", "INE", "GFEX", "GZFE",
+})
+
+
 def _full_code(instrument_id, exchange_id):
-    code = str(instrument_id or "").strip().upper()
+    if instrument_id is None:
+        return ""
+    raw = str(instrument_id).strip()
+    if not raw:
+        return ""
     market = str(exchange_id or "").strip().upper()
-    if "." in code:
-        return normalize_stock_code(code)
-    if market in ("SH", "SZ"):
-        return normalize_stock_code("%s.%s" % (code, market))
-    return normalize_stock_code(code)
+    if "." in raw:
+        return normalize_stock_code(raw)
+    # Futures: decide purely from the exchange field (no code-shape guessing).
+    # Symbol is case-sensitive and preserved as-is; XunTou-short tokens get the
+    # suffix appended, counter display IDs return the raw bare key.
+    if market in _FUTURES_EXCHANGE_TOKENS:
+        return "%s.%s" % (raw, market)
+    if market in _FUTURES_EXCHANGES:
+        # Unexpected path: POSITION rows normally carry the XunTou-short token
+        # (DF/SF/...), so a display ID here signals a structure/vendor mismatch.
+        # Surface it so the caller can tell the difference from a genuine
+        # futures row that carries the XunTou-short token.
+        raise ValueError(
+            f"[bigqmt_code] futures exchange reported a display ID "
+            f"'{market}' for instrument '{raw}'; expected the XunTou-short "
+            f"token (e.g. 'DF' for DCE), not the counter-style ID"
+        )
+    # Stock/mutual-fund/HK-Connect: normalize into standard upper-case with suffix.
+    if market in _STOCK_EXCHANGE_TOKENS:
+        return normalize_stock_code("%s.%s" % (raw, market))
+    # Unknown/empty exchange: an instrument is never a futures contract without
+    # an exchange, so hand it to the normalizer and let an unrecognizable code
+    # raise -- a bare code here means the row itself is malformed.
+    return normalize_stock_code(raw)
 
 
 class BigQmtPositionProvider:
