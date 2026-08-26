@@ -1818,7 +1818,56 @@ class BigQmtXtTrader:
         except Exception:
             log.exception("user callback failed: on_account_status")
 
+    def _event_loop_push_channel(self):
+        """zmq: exec events arrive on the same PUB socket as whole-quote data.
+
+        Reuses _build_quote_push_channel so the address derivation stays in one
+        place. The subscriber runs its own thread, so this loop only keeps the
+        channel alive and rebuilds it if the account changes or it dies.
+        """
+        from .exec_events import EXEC_TOPICS
+
+        topics = sorted(set(EXEC_TOPICS.values()))
+        while self._event_running:
+            channel = None
+            account_id = str(self.client.account_id or "")
+            try:
+                channel = self._build_quote_push_channel()
+                channel.start_subscriber(topics, self._on_push_exec_event)
+                while self._event_running:
+                    if str(self.client.account_id or "") != account_id:
+                        break      # account changed -> rebuild against the new address
+                    time.sleep(0.5)
+            except Exception:
+                time.sleep(1.0)
+            finally:
+                if channel is not None:
+                    try:
+                        channel.stop()
+                    except Exception:
+                        pass
+
+    def _on_push_exec_event(self, topic, data):
+        """Push-channel callback. The payload is already a decoded dict, unlike
+        the Redis path which hands over raw bytes."""
+        try:
+            self._dispatch_event(data)
+        except Exception:
+            pass
+
     def _event_loop(self):
+        """Receive exec events. Redis deployments subscribe to the per-account
+        channels; zmq deployments ride the quote push channel.
+
+        Exec events used to be Redis-only, so a zmq deployment received no
+        order/trade callbacks at all -- silently, since the loop just failed to
+        connect and retried forever (issue #76).
+        """
+        transport = str(getattr(self.client, "transport_name", "redis") or "redis").lower()
+        if transport == "zmq":
+            self._event_loop_push_channel()
+            return
+
         from .exec_events import (
             order_channel,
             trade_channel,
@@ -1854,14 +1903,22 @@ class BigQmtXtTrader:
                     pass
 
     def _dispatch_event(self, raw):
+        """Accepts raw bytes/str (Redis pub/sub) or an already-decoded dict.
+
+        The push channel decodes msgpack/json itself, so it hands over a dict --
+        str(dict) is not valid JSON and would be silently dropped here.
+        """
         callback = self.callback
         if callback is None:
             return
-        try:
-            text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
-            event = json.loads(text)
-        except Exception:
-            return
+        if isinstance(raw, dict):
+            event = raw
+        else:
+            try:
+                text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
+                event = json.loads(text)
+            except Exception:
+                return
         if not isinstance(event, dict):
             return
         # 放行超时的屏障, 再决定这条事件是直通还是暂存 (issue #51)。

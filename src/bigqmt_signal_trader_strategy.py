@@ -972,6 +972,28 @@ def handlebar(ContextInfo):
     return adjust(ContextInfo, _source="handlebar")
 
 
+def _exec_event_sink(config):
+    """Where exec events go: a Redis client, or the quote push channel.
+
+    Exec events were Redis-only, so a zmq deployment with no Redis configured
+    silently delivered no order/trade callbacks at all -- _publish_exec_event
+    simply returned (issue #76). zmq deployments already run a push channel for
+    whole-quote data, so reuse it rather than opening a second socket.
+
+    Redis stays first when available: its channels carry streams for short
+    replay, which the push channel has no equivalent of.
+    """
+    redis_client = _exec_event_redis(config)
+    if redis_client is not None:
+        return redis_client
+    if _quote_subscription_service is not None:
+        try:
+            return _quote_subscription_service[1]      # (manager, channel)
+        except Exception:
+            pass
+    return None
+
+
 def _exec_event_redis(config):
     """Return a redis client for exec-event publishing, reusing one instance.
 
@@ -1026,8 +1048,8 @@ def _publish_exec_event(kind, obj):
     account_id = str(event_config.get("account_id") or config.get("account_id") or _account_id or "")
     if not account_id:
         return
-    redis_client = _exec_event_redis(config)
-    if redis_client is None:
+    sink = _exec_event_sink(config)
+    if sink is None:
         return
     try:
         from bigqmt_signal_trader import exec_events
@@ -1036,13 +1058,19 @@ def _publish_exec_event(kind, obj):
             event = exec_events.normalize_trade_event(obj, account_id)
             if raw_fields:
                 event["raw_fields"] = raw_fields
-            exec_events.publish_trade_event(redis_client, account_id, event)
+            exec_events.publish_exec_event(sink, account_id, event)
         else:
             event = exec_events.normalize_order_event(obj, account_id)
-            event = exec_events.enrich_order_identity(redis_client, account_id, event)
+            # Identity enrichment reads the remark->identity map that
+            # remember_order_identity wrote, which only exists in Redis. On a
+            # push channel the event goes out un-enriched rather than not at
+            # all; order_sys_id and remark are already on it.
+            redis_client = _exec_event_redis(config)
+            if redis_client is not None:
+                event = exec_events.enrich_order_identity(redis_client, account_id, event)
             if raw_fields:
                 event["raw_fields"] = raw_fields
-            exec_events.publish_order_event(redis_client, account_id, event)
+            exec_events.publish_exec_event(sink, account_id, event)
             # 废单 (status=57 ENTRUST_STATUS_JUNK) 推送 order_error，让客户端
             # on_order_error 能感知下单被拒。
             try:
@@ -1053,7 +1081,7 @@ def _publish_exec_event(kind, obj):
                 err_event = exec_events.normalize_order_error_event(obj, account_id)
                 if raw_fields:
                     err_event["raw_fields"] = raw_fields
-                exec_events.publish_order_error_event(redis_client, account_id, err_event)
+                exec_events.publish_exec_event(sink, account_id, err_event)
     except Exception as exc:
         _log_err("exec_events", "publish %s failed: %s" % (kind, exc))
 

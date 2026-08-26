@@ -475,6 +475,46 @@ def normalize_trade_event(trade, account_id=""):
     }
 
 
+# Push-channel topics, used when exec events travel over the quote push channel
+# instead of Redis pub/sub. They mirror the Redis channel names minus the
+# account (a zmq PUB socket is already per-account).
+EXEC_TOPICS = {
+    EVENT_ORDER: "exec:order",
+    EVENT_TRADE: "exec:trade",
+    "order_error": "exec:order_error",
+    "cancel_error": "exec:cancel_error",
+}
+
+
+def exec_topic(event_type):
+    return EXEC_TOPICS.get(str(event_type or ""), "exec:order")
+
+
+def publish_exec_event(sink, account_id, event):
+    """Publish one exec event through whichever sink the deployment has.
+
+    ``sink`` is either a Redis client or a QuotePushChannel. Redis stays on the
+    original per-account channels (streams + pub/sub, so short replay keeps
+    working); a push channel gets one topic per event type.
+
+    Exec events used to be Redis-only, which meant a zmq deployment silently
+    received no order/trade callbacks at all (issue #76) -- the publish path
+    just returned when no Redis client could be built.
+    """
+    event_type = str((event or {}).get("event_type") or EVENT_ORDER)
+    if hasattr(sink, "publish") and not hasattr(sink, "xadd"):
+        # QuotePushChannel: publish(topic, data).
+        sink.publish(exec_topic(event_type), event)
+        return event
+    if event_type == EVENT_TRADE:
+        return publish_trade_event(sink, account_id, event)
+    if event_type == "order_error":
+        return publish_order_error_event(sink, account_id, event)
+    if event_type == "cancel_error":
+        return publish_cancel_error_event(sink, account_id, event)
+    return publish_order_event(sink, account_id, event)
+
+
 def _publish(redis_client, channel, event, maxlen=2000):
     raw = json.dumps(event, ensure_ascii=False, default=str)
     try:
