@@ -63,6 +63,7 @@ READ_METHODS = {
     "get_formula_result",
     "gen_factor_index",
     "get_positions",
+    "get_position_statistics",
     "get_asset",
     "query_orders",
     "query_trades",
@@ -125,6 +126,7 @@ LISTENER_DEFERRED_METHODS = {
     # data. Asset queries use the same QMT detail API and must follow this rule.
     "get_asset",
     "get_positions",
+    "get_position_statistics",
     "query_stock_position",
     "query_orders",
     "query_trades",
@@ -164,6 +166,7 @@ METHOD_ALIASES = {
     "getDividFactors": "get_divid_factors",
     "query_stock_asset": "get_asset",
     "query_stock_positions": "get_positions",
+    "query_position_statistics": "get_position_statistics",
     "query_stock_orders": "query_orders",
     "query_stock_trades": "query_trades",
     "order_stock": "submit_order",
@@ -598,6 +601,9 @@ class BigQmtRpcHandlers:
 
     def _handle_get_positions(self, params):
         return self.position_provider.get_positions(self._request_account_id(params))
+
+    def _handle_get_position_statistics(self, params):
+        return self.position_provider.get_position_statistics(self._request_account_id(params))
 
     def _handle_query_stock_position(self, params):
         stock_code = str(params.get("stock_code") or params.get("code") or "").strip()
@@ -1582,6 +1588,18 @@ class RedisPubSubRpcService:
         return template.format(account_id=account_id, request_id=request_id)
 
     def _publish_response(self, request, response):
+        try:
+            print(
+                "%s >> send method=%s ok=%s payload=%s"
+                % (
+                    self.print_prefix,
+                    response.get("method"),
+                    response.get("ok"),
+                    json.dumps(response, ensure_ascii=False)[:2000],
+                )
+            )
+        except Exception:
+            pass
         # Delegate to the transport (RedisTransport fans out to key/list/channel;
         # ZMQ/MySQL transports use their native reply path).
         self._transport.send_response(request, response)

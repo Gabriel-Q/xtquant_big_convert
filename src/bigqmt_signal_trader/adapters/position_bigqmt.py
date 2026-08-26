@@ -1,7 +1,7 @@
 """Big QMT position and asset adapters."""
 
 from ..code_utils import normalize_stock_code
-from ..models import AssetSnapshot, PositionSnapshot
+from ..models import AssetSnapshot, PositionSnapshot, PositionStatisticsSnapshot
 
 
 def _attr(obj, names, default=None):
@@ -182,6 +182,81 @@ class BigQmtPositionProvider:
                 direction=int(_attr(row, ("m_nDirection", "direction"), 48) or 48),
             )
         return positions
+
+    def get_position_statistics(self, account_id):
+        query = self._require_query_func()
+        try:
+            rows = query(account_id, self.account_type, "POSITION_STATISTICS") or []
+        except Exception:
+            return []
+        stats = []
+        for row in rows:
+            try:
+                code = _full_code(
+                    _attr(row, ("m_strInstrumentID", "instrument_id", "stock_code")),
+                    _attr(row, ("m_strExchangeID", "exchange_id", "market")),
+                )
+            except Exception as exc:
+                skip_unparsable_row("POSITION_STATISTICS", row, exc)
+                continue
+            stats.append(
+                PositionStatisticsSnapshot(
+                    account_id=account_id,
+                    exchange_id=str(_attr(row, ("m_strExchangeID", "exchange_id", "market"), "") or ""),
+                    exchange_name=str(_attr(row, ("m_strExchangeName", "exchange_name"), "") or ""),
+                    product_id=str(_attr(row, ("m_strProductID", "product_id"), "") or ""),
+                    instrument_id=str(_attr(row, ("m_strInstrumentID", "instrument_id"), "") or ""),
+                    instrument_name=str(_attr(row, ("m_strInstrumentName", "instrument_name"), "") or ""),
+                    stock_code=code,
+                    direction=int(_attr(row, ("m_nDirection", "direction"), 0) or 0),
+                    hedge_flag=int(_attr(row, ("m_nHedgeFlag", "hedge_flag"), 0) or 0),
+                    position=int(_attr(row, ("m_nPosition", "position"), 0) or 0),
+                    yesterday_position=int(_attr(row, ("m_nYestodayPosition", "yesterday_position"), 0) or 0),
+                    today_position=int(_attr(row, ("m_nTodayPosition", "today_position"), 0) or 0),
+                    can_close_vol=int(_attr(row, ("m_nCanCloseVol", "can_close_vol"), 0) or 0),
+                    position_cost=_float_or_none(_attr(row, ("m_dPositionCost", "position_cost"))),
+                    avg_price=_float_or_none(_attr(row, ("m_dAvgPrice", "avg_price"))),
+                    position_profit=_float_or_none(_attr(row, ("m_dPositionProfit", "position_profit"))),
+                    float_profit=_float_or_none(_attr(row, ("m_dFloatProfit", "float_profit"))),
+                    open_price=_float_or_none(_attr(row, ("m_dOpenPrice", "open_price"))),
+                    used_margin=_float_or_none(_attr(row, ("m_dUsedMargin", "used_margin"))),
+                    used_commission=_float_or_none(_attr(row, ("m_dUsedCommission", "used_commission"))),
+                    frozen_margin=_float_or_none(_attr(row, ("m_dFrozenMargin", "frozen_margin"))),
+                    frozen_commission=_float_or_none(_attr(row, ("m_dFrozenCommission", "frozen_commission"))),
+                    instrument_value=_float_or_none(_attr(row, ("m_dInstrumentValue", "instrument_value"))),
+                    open_times=int(_attr(row, ("m_nOpenTimes", "open_times"), 0) or 0),
+                    open_volume=int(_attr(row, ("m_nOpenVolume", "open_volume"), 0) or 0),
+                    cancel_times=int(_attr(row, ("m_nCancelTimes", "cancel_times"), 0) or 0),
+                    last_price=_float_or_none(_attr(row, ("m_dLastPrice", "last_price"))),
+                    rise_ratio=_float_or_none(_attr(row, ("m_dRiseRatio", "rise_ratio"))),
+                    product_name=str(_attr(row, ("m_strProductName", "product_name"), "") or ""),
+                    royalty=_float_or_none(_attr(row, ("m_dRoyalty", "royalty"))),
+                    expire_date=str(_attr(row, ("m_strExpireDate", "expire_date"), "") or ""),
+                    assest_weight=_float_or_none(_attr(row, ("m_dAssestWeight", "assest_weight"))),
+                    increase_by_settlement=_float_or_none(
+                        _attr(row, ("m_dIncreaseBySettlement", "increase_by_settlement"))
+                    ),
+                    margin_ratio=_float_or_none(_attr(row, ("m_dMarginRatio", "margin_ratio"))),
+                    float_profit_divide_by_used_margin=_float_or_none(
+                        _attr(row, ("m_dFloatProfitDivideByUsedMargin", "float_profit_divide_by_used_margin"))
+                    ),
+                    float_profit_divide_by_balance=_float_or_none(
+                        _attr(row, ("m_dFloatProfitDivideByBalance", "float_profit_divide_by_balance"))
+                    ),
+                    today_profit_loss=_float_or_none(_attr(row, ("m_dTodayProfitLoss", "today_profit_loss"))),
+                    yesterday_init_position=int(
+                        _attr(row, ("m_nYestodayInitPosition", "yesterday_init_position"), 0) or 0
+                    ),
+                    frozen_royalty=_float_or_none(_attr(row, ("m_dFrozenRoyalty", "frozen_royalty"))),
+                    today_close_profit_loss=_float_or_none(
+                        _attr(row, ("m_dTodayCloseProfitLoss", "today_close_profit_loss"))
+                    ),
+                    close_profit=_float_or_none(_attr(row, ("m_dCloseProfit", "close_profit"))),
+                    ft_product_name=str(_attr(row, ("m_strFtProductName", "ft_product_name"), "") or ""),
+                    open_cost=_float_or_none(_attr(row, ("m_dOpenCost", "open_cost"))),
+                )
+            )
+        return stats
 
     def get_asset(self, account_id):
         query = self._require_query_func()

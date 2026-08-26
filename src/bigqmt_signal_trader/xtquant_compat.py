@@ -2097,6 +2097,119 @@ class BigQmtXtTrader:
                 raise
         return [self._position_object(account_id, item) for item in self._position_items(data)]
 
+    def query_position_statistics(self, account):
+        """Intraday position statistics (futures), mirroring MiniQMT ``query_position_statistics``.
+
+        Returns a list of :class:`XtPositionStatistics`-style :class:`CompatObject`.
+        The server queries via ``get_trade_detail_data(..., "POSITION_STATISTICS")``.
+        """
+        account_id = _account_id(account, self.client.account_id)
+        data = self.client.call(
+            "query_position_statistics",
+            {"account_id": account_id},
+            account_id=account_id,
+        ) or {}
+        return [self._position_statistics_object(account_id, item) for item in _as_list(data)]
+
+    def _position_statistics_object(self, account_id, item):
+        return CompatObject(
+            account_id=account_id,
+            exchange_id=str(item.get("exchange_id") or ""),
+            exchange_name=str(item.get("exchange_name") or ""),
+            product_id=str(item.get("product_id") or ""),
+            instrument_id=str(item.get("instrument_id") or ""),
+            instrument_name=str(item.get("instrument_name") or ""),
+            stock_code=str(item.get("stock_code") or ""),
+            direction=_safe_int(item.get("direction"), 0),
+            hedge_flag=_safe_int(item.get("hedge_flag"), 0),
+            position=_safe_int(item.get("position"), 0),
+            yesterday_position=_safe_int(item.get("yesterday_position"), 0),
+            today_position=_safe_int(item.get("today_position"), 0),
+            can_close_vol=_safe_int(item.get("can_close_vol"), 0),
+            position_cost=_safe_float(item.get("position_cost"), None),
+            avg_price=_safe_float(item.get("avg_price"), None),
+            position_profit=_safe_float(item.get("position_profit"), None),
+            float_profit=_safe_float(item.get("float_profit"), None),
+            open_price=_safe_float(item.get("open_price"), None),
+            used_margin=_safe_float(item.get("used_margin"), None),
+            used_commission=_safe_float(item.get("used_commission"), None),
+            frozen_margin=_safe_float(item.get("frozen_margin"), None),
+            frozen_commission=_safe_float(item.get("frozen_commission"), None),
+            instrument_value=_safe_float(item.get("instrument_value"), None),
+            open_times=_safe_int(item.get("open_times"), 0),
+            open_volume=_safe_int(item.get("open_volume"), 0),
+            cancel_times=_safe_int(item.get("cancel_times"), 0),
+            last_price=_safe_float(item.get("last_price"), None),
+            rise_ratio=_safe_float(item.get("rise_ratio"), None),
+            product_name=str(item.get("product_name") or ""),
+            royalty=_safe_float(item.get("royalty"), None),
+            expire_date=str(item.get("expire_date") or ""),
+            assest_weight=_safe_float(item.get("assest_weight"), None),
+            increase_by_settlement=_safe_float(item.get("increase_by_settlement"), None),
+            margin_ratio=_safe_float(item.get("margin_ratio"), None),
+            float_profit_divide_by_used_margin=_safe_float(
+                item.get("float_profit_divide_by_used_margin"), None
+            ),
+            float_profit_divide_by_balance=_safe_float(
+                item.get("float_profit_divide_by_balance"), None
+            ),
+            today_profit_loss=_safe_float(item.get("today_profit_loss"), None),
+            yesterday_init_position=_safe_int(item.get("yesterday_init_position"), 0),
+            frozen_royalty=_safe_float(item.get("frozen_royalty"), None),
+            today_close_profit_loss=_safe_float(item.get("today_close_profit_loss"), None),
+            close_profit=_safe_float(item.get("close_profit"), None),
+            ft_product_name=str(item.get("ft_product_name") or ""),
+            open_cost=_safe_float(item.get("open_cost"), None),
+            # ===== native xtquant field-name aliases (m_-prefixed access) =====
+            m_strAccountID=account_id,
+            m_strStockCode=str(item.get("stock_code") or ""),
+            m_strExchangeID=str(item.get("exchange_id") or ""),
+            m_strExchangeName=str(item.get("exchange_name") or ""),
+            m_strProductID=str(item.get("product_id") or ""),
+            m_strInstrumentID=str(item.get("instrument_id") or ""),
+            m_strInstrumentName=str(item.get("instrument_name") or ""),
+            m_nDirection=_safe_int(item.get("direction"), 0),
+            m_nHedgeFlag=_safe_int(item.get("hedge_flag"), 0),
+            m_nPosition=_safe_int(item.get("position"), 0),
+            m_nYestodayPosition=_safe_int(item.get("yesterday_position"), 0),
+            m_nTodayPosition=_safe_int(item.get("today_position"), 0),
+            m_nCanCloseVol=_safe_int(item.get("can_close_vol"), 0),
+            m_dPositionCost=_safe_float(item.get("position_cost"), None),
+            m_dAvgPrice=_safe_float(item.get("avg_price"), None),
+            m_dPositionProfit=_safe_float(item.get("position_profit"), None),
+            m_dFloatProfit=_safe_float(item.get("float_profit"), None),
+            m_dOpenPrice=_safe_float(item.get("open_price"), None),
+            m_dUsedMargin=_safe_float(item.get("used_margin"), None),
+            m_dUsedCommission=_safe_float(item.get("used_commission"), None),
+            m_dFrozenMargin=_safe_float(item.get("frozen_margin"), None),
+            m_dFrozenCommission=_safe_float(item.get("frozen_commission"), None),
+            m_dInstrumentValue=_safe_float(item.get("instrument_value"), None),
+            m_nOpenTimes=_safe_int(item.get("open_times"), 0),
+            m_nOpenVolume=_safe_int(item.get("open_volume"), 0),
+            m_nCancelTimes=_safe_int(item.get("cancel_times"), 0),
+            m_dLastPrice=_safe_float(item.get("last_price"), None),
+            m_dRiseRatio=_safe_float(item.get("rise_ratio"), None),
+            m_strProductName=str(item.get("product_name") or ""),
+            m_dRoyalty=_safe_float(item.get("royalty"), None),
+            m_strExpireDate=str(item.get("expire_date") or ""),
+            m_dAssestWeight=_safe_float(item.get("assest_weight"), None),
+            m_dIncreaseBySettlement=_safe_float(item.get("increase_by_settlement"), None),
+            m_dMarginRatio=_safe_float(item.get("margin_ratio"), None),
+            m_dFloatProfitDivideByUsedMargin=_safe_float(
+                item.get("float_profit_divide_by_used_margin"), None
+            ),
+            m_dFloatProfitDivideByBalance=_safe_float(
+                item.get("float_profit_divide_by_balance"), None
+            ),
+            m_dTodayProfitLoss=_safe_float(item.get("today_profit_loss"), None),
+            m_nYestodayInitPosition=_safe_int(item.get("yesterday_init_position"), 0),
+            m_dFrozenRoyalty=_safe_float(item.get("frozen_royalty"), None),
+            m_dTodayCloseProfitLoss=_safe_float(item.get("today_close_profit_loss"), None),
+            m_dCloseProfit=_safe_float(item.get("close_profit"), None),
+            m_strFtProductName=str(item.get("ft_product_name") or ""),
+            m_dOpenCost=_safe_float(item.get("open_cost"), None),
+        )
+
     def query_stock_position(self, account, stock_code):
         account_id = _account_id(account, self.client.account_id)
         try:
