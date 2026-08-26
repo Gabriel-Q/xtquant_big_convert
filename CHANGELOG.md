@@ -2,6 +2,28 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
+## [0.2.10] - 2026-08-26
+
+### 修复
+
+- **zmq 部署收不到任何回调推送**（Issue #76）：order/trade 事件**两端都硬绑 Redis**——服务端 `_publish_exec_event` 建不出 Redis 客户端就直接 `return`，客户端 `_event_loop` 只订阅 Redis 频道。纯 zmq 部署因此完全收不到 `on_stock_order` / `on_stock_trade` / `on_order_error`，而且是**静默的**：客户端只是连不上然后无限重试，服务端把「没有 Redis」当正常跳过。现在 exec 事件复用已有的全推行情 PUB 通道（不新开端口），Redis 仍优先（其频道带 stream 可做短重放）。报告人读代码就把这个推了出来。
+- **adjust 每个 tick 都在新建 Redis 客户端**（PR #79）：`_pump_download_jobs` 每次运行都建一个新客户端，而它每个 tick 都跑——按 100ms 间隔就是**每秒 10 个**，每个带一套连接池。症状是 QMT 面板里的 `AttributeError: 'Redis' object has no attribute 'connection'`（redis-py 的 `__del__` 跑在构造未完成的对象上），一天 31 次。Python 把它吞成 `Exception ignored in`，所以**从没进过 `bigqmt.log`**。`_exec_event_redis` 早已为同样理由加过缓存，此处被漏掉；修复是复用同一个缓存 helper。
+- **一行无法解析的数据搞垮整个查询**（PR #70）：#73 让 `_full_code` 遇到柜台式交易所 ID 时抛异常——信号本身对，但三个调用方的行循环都无逐行保护，异常一路抛出 `get_positions` / `query_orders` / `query_trades`。一行异常 = 整个持仓查不到；`query_orders` 外层 `except` 返回 `[]`，丢的是全部委托。现在跳过该行、其余照常返回。
+- **xtquant / xtquant_compat 循环导入**（PR #74）：#73 反转常量依赖后，`xtquant/__init__` 急切加载的 `xtdata`/`xttrader` 又反向引用 `xtquant_compat`，环闭合——`import bigqmt_signal_trader` 直接失败、**27 个测试模块无法收集**。且**依赖导入顺序**（先 import xtquant 能过），这类 bug 平时测不出来。两个 shim 改为通过模块级 `__getattr__`（PEP 562）惰性解析；调用方三种写法（属性访问 / from-import / 子模块导入）全部逐项验证不变。
+
+### 变更（PR #73，@ReCodeLife）
+
+- **常量定义迁回 shim 侧**：`xtquant/xtconstant.py` 补全为完整实现（90 → 539 个），`xtquant_compat` 改为 `from xtquant.xtconstant import *` 并删去 142 行硬编码。对着 QMT 自带原生 SDK 逐个比对：**原生 90 个常量 0 个值被改动、0 个缺失**，新增 443 个券商扩展枚举。`xttype` 同步扩展。
+- **期货持仓代码解析**（PR #68，@ReCodeLife）：裸期货合约（交易所字段为迅投简称 DF/SF/ZF）此前被送进股票归一化并抛错。改为按交易所字段分类、不猜代码形状，并**保留符号原始大小写**（`rb2401.SF` 小写 / `AP401.ZF` 大写，不可互换）。新增 `BIGQMT_ACCOUNT_TYPE` 配置（默认 `STOCK`）。
+
+### 已知限制
+
+- **#79 的实盘验证不充分**：修复后线上 0 次，但**重启前也是 0 次**（问题出现在前一日），所以这个 0 不构成证据。行为由单测钉住（20 次调用 → 1 个客户端，还原即变红），实盘待自然复现。
+- **#76 的真实回调投递未验证**：已验证通道连通、格式正确、部署版代码端到端可投递（order/trade/order_error 三类），但真实回调需**实际下单**才触发，收盘后订阅收到 0 个事件属正常。
+- **#58 的期货小写代码仍缺实盘样本**；**#56 单文件构建**未进主干（报告人的脚本依赖两个未附带模块）；**#77 / #78** 待报告人补充信息。
+
+---
+
 ## [0.2.9] - 2026-08-24
 
 ### 修复
