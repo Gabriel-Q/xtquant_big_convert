@@ -874,14 +874,20 @@ def _pump_download_jobs(context_info, config):
     account_id = str(job_config.get("account_id") or config.get("account_id") or _account_id or "")
     if not account_id:
         return None
-    redis_client = getattr(_rpc_service, "redis", None)
+    # Reuse one client. This runs on every adjust tick, so building a client
+    # here leaked one connection pool per tick -- at a 100ms interval that is
+    # ten per second. The symptom is easy to miss: the pools are garbage
+    # collected, and redis-py's __del__ then raises
+    # "AttributeError: 'Redis' object has no attribute 'connection'", which
+    # Python swallows as "Exception ignored in". It never reaches a log the
+    # package writes; it only shows up in the QMT panel.
+    #
+    # _exec_event_redis already learned this lesson and caches; this path was
+    # missed. Both only build a client when _rpc_service has none, which is the
+    # zmq-transport case.
+    redis_client = _exec_event_redis(config)
     if redis_client is None:
-        redis_config = dict(config.get("redis") or {})
-        if not redis_config:
-            return None
-        from bigqmt_signal_trader.adapters.redis_common import build_redis_client
-
-        redis_client = build_redis_client(redis_config)
+        return None
     market_data = getattr(getattr(_rpc_service, "handlers", None), "market_data", None)
     if market_data is None:
         from bigqmt_signal_trader.adapters.market_bigqmt import BigQmtMarketDataProvider
