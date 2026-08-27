@@ -2,6 +2,56 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
+## [0.2.13] - 2026-08-27
+
+### 修复
+
+- **`account_type` 三个配置位置里两个静默失效**（Issue #92）：信用账户按 STOCK 查询**不会报错**——`get_trade_detail_data` 返回一行全 0 的资产。所以这个设置错了，表现就是「信用账户资产全是 0」，日志里没有任何线索。
+
+  三个看着都合理的位置，此前只有一个生效：
+
+  | 位置 | 修复前 |
+  |---|---|
+  | local config 里的 `BIGQMT_ACCOUNT_TYPE` | 生效 |
+  | `BIGQMT_REDIS_CONFIG["account_type"]` | **无人读取** |
+  | 改 `redis_rpc_runtime.py` 里的 `ACCOUNT_TYPE` | **被静默覆盖** |
+
+  第三条尤其阴：解析式是 `BIGQMT_ACCOUNT_TYPE or ACCOUNT_TYPE or "STOCK"`，而随包发的 example 配置里写着 `BIGQMT_ACCOUNT_TYPE = "STOCK"`——它是真值，永远赢，所以改文件里那个常量等于白改。报告人用的正是后两条。
+
+  后两个位置现在都认（按上表优先级），并且**解析结果在启动时打印、说明来源**，冲突会指名：
+
+  ```
+  [bigqmt_shell] account_type=CREDIT (from BIGQMT_REDIS_CONFIG['account_type'])
+  [bigqmt_shell] ignored conflicting account_type from: BIGQMT_ACCOUNT_TYPE
+  ```
+
+  模块常量出厂即 `"STOCK"`，因此只有被改动过才算用户的选择——否则每个信用部署都会报一条与它的假冲突。
+
+  **需要说清楚哪部分本来就没坏**：`account_type` 一旦解析出来，确实能正确到达 `get_trade_detail_data(account, 'CREDIT', 'ACCOUNT')`。新增 10 个测试中有 2 个覆盖该链路，它们在修复前的代码上也通过；另外 8 个会红。
+
+### 已验证
+
+- **PR #82 的 `traded_price` 拿到实盘证据**（0.2.11、0.2.12 两版的已知限制，现已解除）：实盘 18 笔委托、14 笔成交，逐笔核对——
+
+  ```
+  traded_price 与 price 不同的:  9 笔    (最大差 10.56)
+  两者相同的:                    5 笔    (限价单按报价成交)
+  已成交但 traded_price 为 0 的:  0 笔    (修复前应为全部 14 笔)
+  ```
+
+  证明 `traded_price` 是真实成交均价，而非 `price` 的副本。
+
+### 已知限制
+
+- **信用委托类型仍会被塌缩成普通买卖**：PR #88 试图修此问题，但其映射把 `33` / `34` 认成了专项融资买入/专项融券卖出——那两个实际是 `OPT_OPTION_SELL_CLOSE` / `OPT_OPTION_SELL_OPEN`（期权操作），专项信用是 `40` / `41`；另缺 9 个信用类型，含最基本的 `28 CREDIT_SLO_SELL`。已请求修改，本版未合入。
+- **#92 的信用账户表现未实盘确认**：本机为股票账户，**无信用账户可验证「资产不再全 0」**。本版修的是配置发现与可见性，该部分完全由测试钉住，并已部署 QMT 重启验证（日志首次打印 `account_type=STOCK (from default)`，与股票账户未设置的预期一致，回归 6/6 PASS）。请 @jerry87n 在信用账户上复测。
+- **`can_close_vol` 在股票账户上返回 LLONG_MAX 哨兵值**（Issue #84）。
+- **单文件构建需要源码检出**：`tools/` 不随 wheel/sdist 分发；目标沙箱环境未在本机复现（本机 QMT 不拒绝 `import redis`），真实加载由 @heimo88 实测。
+- **PR #81 的接口尚未补全**：`EmptyPositionProvider` 与 `PositionProvider` 协议均缺 `get_position_statistics`。
+- **#77**（同终端双账户）属当前设计。**#78** 待报告人补充环境信息。
+
+---
+
 ## [0.2.12] - 2026-08-27
 
 ### 新增
