@@ -11,6 +11,7 @@ import importlib as _importlib
 import sys
 import threading
 import time
+import traceback as _traceback
 
 # The DRYRUN entry reloads strategy/runtime/redis_rpc/redis_common but NOT the
 # other package submodules. Without this, the "from adapter_factory import build_app"
@@ -54,6 +55,59 @@ else:
         tick_app,
     )
     from bigqmt_signal_trader.runtime_bigqmt import BigQmtRuntimeAdapter
+
+
+# exec_events is loaded here, at module load, and never from inside the
+# order/deal callback. QMT runs those callbacks on a C++ thread entered via
+# PyGILState_Ensure; the first exec of a not-yet-imported module on such a
+# thread fails down in the C layer WITHOUT setting a Python exception, which
+# surfaces as SystemError "error return without exception set" (issue #76,
+# live repro 2026-08-27). Modules already in sys.modules resolve fine there --
+# which is why this only bites deployments where the init-time reload could not
+# preload it, i.e. the single-file QMT sandbox build.
+def _import_exec_events():
+    # In the QMT sandbox a package-level "from bigqmt_signal_trader import x"
+    # goes through the C-level __import__ and fails the same way; the local
+    # loader that already serves the adapter modules does not.
+    if _load_bridge_module is not None:
+        return _load_bridge_module("bigqmt_signal_trader.exec_events")
+    from bigqmt_signal_trader import exec_events
+
+    return exec_events
+
+
+def _load_exec_events():
+    try:
+        return _import_exec_events()
+    except Exception:
+        direct_error = _traceback.format_exc()
+    # Only reached when the direct load failed. A plain threading.Thread always
+    # has a full Python thread state, so the exec that just failed succeeds
+    # there; the import lock makes handing the result back safe.
+    holder = {}
+
+    def _target():
+        try:
+            holder["module"] = _import_exec_events()
+        except Exception:
+            pass
+
+    try:
+        worker = threading.Thread(target=_target)
+        worker.start()
+        worker.join()
+    except Exception:
+        pass
+    if holder.get("module") is not None:
+        return holder["module"]
+    print(
+        "[bigqmt_signal_trader] exec_events load failed; exec-event push is "
+        "disabled for this run:\n%s" % direct_error
+    )
+    return None
+
+
+_exec_events = _load_exec_events()
 
 
 _app_factory = None
@@ -1035,10 +1089,12 @@ def _publish_exec_event(kind, obj):
     # enabled/account_id early returns), because the point is to observe the
     # object exactly as QMT handed it over — even when publishing is off.
     raw_fields = None
+    exec_events = _exec_events
+    if exec_events is None:
+        # Already reported once at module load; a per-callback log would flood.
+        return
     if _config_bool(event_config.get("debug_raw_fields"), False):
         try:
-            from bigqmt_signal_trader import exec_events
-
             print(exec_events.format_raw_snapshot(kind, obj))
             raw_fields = exec_events.raw_field_snapshot(obj)
         except Exception as exc:
@@ -1052,8 +1108,6 @@ def _publish_exec_event(kind, obj):
     if sink is None:
         return
     try:
-        from bigqmt_signal_trader import exec_events
-
         if kind == "trade":
             event = exec_events.normalize_trade_event(obj, account_id)
             if raw_fields:
@@ -1083,7 +1137,14 @@ def _publish_exec_event(kind, obj):
                     err_event["raw_fields"] = raw_fields
                 exec_events.publish_exec_event(sink, account_id, err_event)
     except Exception as exc:
-        _log_err("exec_events", "publish %s failed: %s" % (kind, exc))
+        # str(exc) alone reads "error return without exception set" with no hint
+        # of where it came from -- that is what made issue #76 take a day to
+        # pin down. Carry the exception class and the traceback.
+        _log_err(
+            "exec_events",
+            "publish %s failed: %s (%s)\n%s"
+            % (kind, exc, exc.__class__.__name__, _traceback.format_exc()),
+        )
 
 
 def order_callback(ContextInfo, orderInfo):
