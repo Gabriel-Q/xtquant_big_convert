@@ -1588,18 +1588,6 @@ class RedisPubSubRpcService:
         return template.format(account_id=account_id, request_id=request_id)
 
     def _publish_response(self, request, response):
-        try:
-            print(
-                "%s >> send method=%s ok=%s payload=%s"
-                % (
-                    self.print_prefix,
-                    response.get("method"),
-                    response.get("ok"),
-                    json.dumps(response, ensure_ascii=False)[:2000],
-                )
-            )
-        except Exception:
-            pass
         # Delegate to the transport (RedisTransport fans out to key/list/channel;
         # ZMQ/MySQL transports use their native reply path).
         self._transport.send_response(request, response)
