@@ -521,6 +521,8 @@ print(xtdata.get_full_tick(["000001.SZ"]))
 
 ### B. 服务端（QMT 内 Python 3.6）
 
+> **前置：先在 QMT 界面里下载 Python 组件。** 全新安装的终端 `bin.x64\` 下**没有 `Lib\` 目录**，也没有 `python.exe`——那是 Python 组件带来的，不是终端自带的，**不要自己手动创建 `Lib\`**。在 QMT 客户端里下载安装该组件后，`bin.x64\Lib\site-packages\` 才会出现，下面的路径才成立。具体入口见迅投官方文档。
+
 QMT 自带 Python 3.6（`bin.x64/python.exe`），**只需按你选的传输装对应依赖**：
 
 | 传输 | 服务端需要的包 | 客户端需要的包 |

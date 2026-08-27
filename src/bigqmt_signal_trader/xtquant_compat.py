@@ -193,6 +193,45 @@ def _quote_push_zmq_address(client):
     return "tcp://%s:%d" % (host, base_port + 1)
 
 
+def _missing_account_id_message():
+    """Say what was searched and what to do, not just that something is missing.
+
+    "Big QMT account_id is required" told the reader nothing about where the
+    config was looked for, so a config file placed one sys.path away from the
+    running interpreter looked identical to no config at all (issue #90).
+    """
+    searched = list(DEFAULT_CLIENT_CONFIG_MODULES)
+    selected = os.environ.get(CLIENT_CONFIG_MODULE_ENV)
+    if selected and selected not in searched:
+        searched.insert(0, selected)
+    found = None
+    try:
+        config = load_client_config()
+        found = (config or {}).get("module")
+    except Exception:
+        pass
+
+    if found:
+        detail = ("imported %s, but it defines no BIGQMT_ACCOUNT_ID"
+                  % found)
+    else:
+        detail = ("none of these modules could be imported: %s"
+                  % ", ".join(searched))
+    lines = [
+        "Big QMT account_id is required -- %s." % detail,
+        "Fix it in any one of these ways:",
+        "  1. put bigqmt_signal_trader_client_config.py somewhere on sys.path"
+        " (the current working directory counts), with BIGQMT_ACCOUNT_ID set;",
+        "  2. set the BIGQMT_ACCOUNT_ID environment variable;",
+        "  3. call bigqmt_signal_trader.xtquant_compat.configure(account_id=...)"
+        " before use;",
+        "  or run `bigqmt-init`, which writes both config files for you.",
+        "configure() also runs at import time, so a config put in place after"
+        " importing this module needs configure() called again.",
+    ]
+    return "\n".join(lines)
+
+
 def load_client_config(module_name=None):
     """Load local private client config without requiring environment variables."""
     candidates = []
@@ -648,7 +687,7 @@ class BigQmtRpcClient:
     def call(self, method, params=None, account_id=None, timeout_seconds=None):
         target_account = str(account_id or self.account_id or "")
         if not target_account:
-            raise ValueError("Big QMT account_id is required")
+            raise ValueError(_missing_account_id_message())
         wait_seconds = self.timeout_seconds if timeout_seconds is None else timeout_seconds
         # Fast path: reference/history reads answered straight by QMT's
         # FormulaServer, bypassing the strategy process and its GIL. Anything it
