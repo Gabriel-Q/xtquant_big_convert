@@ -2,6 +2,46 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
+## [0.2.12] - 2026-08-27
+
+### 新增
+
+- **`bigqmt-init` 配置向导**：部署此前意味着抄两份 `.example.py`、搞清楚三十来个键里哪些真的要改、还要手工保证服务端和客户端两边一致。向导只问会变的那几项——账号、账号类型、传输方式、地址端口、Redis 凭据、是否允许远程下单、部署方式——然后**从同一组答案**生成两份配置，所以它们不可能在连接参数上对不上。选单文件部署时顺带跑对应生成器并把配置烘焙进产物，替换掉占位符。
+
+  三项不问、直接定死：`rpc_background_threads` 恒为 `False`（`get_trade_detail_data` 离开主策略线程返回空，这不是可选项）；`rpc_allow_order_methods` 默认关，打开前明确说明含义；选无 redis 单文件会强制 `transport=zmq`，不会留下一份在无法 import redis 的文件里声称用 redis 的配置。
+
+  密码分两类：Redis 密码是服务凭据，写进配置文件（`.example.py` 本来就这么记的），输入不回显；**QMT 登录密码完全不落盘**——`qmt_launcher` 从 `BIGQMT_LOGIN_PASSWORD` 读，这样它不会出现在 `argv` 或磁盘文件里，向导沿用该约定并在结束时说明。
+
+- **单文件 QMT 构建生成器**（Issue #56，感谢 @heimo88）：部分券商的 QMT 是白名单 + 不能加载文件、不能 import 外部模块，只有把所有代码放进一个策略文件才能跑。`tools/build_single_file.py`（base64 内嵌）和 `tools/build_no_redis_single_file_flat.py`（明文真实代码，强制 zmq）把整个包打成一个自包含文件，运行时用自定义 import 钩子从内存解析。脚本由报告人在其券商环境实测通过。
+
+  合入时换掉了模板里夹带的提交者个人实盘配置（真实账号、`rpc_allow_order_methods=True`、`rpc_background_threads=True`、`full_tick_cache_enabled=True`），并补上两个模板都缺的 `BIGQMT_ACCOUNT_TYPE`（#68 加的）。产物已 `.gitignore`，用时重新生成。
+
+  flat 版把每个模块缩进进 `def _mod_N():` 再 exec——**正是让 `from X import *` 报 `SyntaxError: import * only allowed at module level` 的那个形状**。所以这个构建既依赖 0.2.11 对 #76 的修复，现在也成了它的回归守卫：整个测试套件里没有别的地方会把模块编译进函数体。
+
+### 修复
+
+- **负债合约查询少传一个参数**（PR #87，@ljjtim）：`get_unclosed_compacts` / `get_closed_compacts` 只传了 `accountID`，而 `docs/BIGQMT_INNER_PYTHON_API_REFERENCE.md` 6.16 记载的签名是两参数、`accountType` 填 `'CREDIT'`。旁边三个单参数接口（`get_debt_contract` / `get_assure_contract` / `get_enable_short_contract`）未受影响，与文档一致。
+
+- **`account_id is required` 说不清问题在哪**（Issue #90）：原来整条消息就一句 `Big QMT account_id is required`，**不说自己找过哪些模块**——所以「配置文件建了但放在当前解释器 import 不到的位置」和「压根没建配置文件」产生的报错一模一样。报告人其实已经建了那个文件。
+
+  现在区分两种成因（没有可导入的模块 / 模块导入了但没定义 `BIGQMT_ACCOUNT_ID`——后者去查 `sys.path` 是南辕北辙），列出三条已逐一实测的解法，并点出时序陷阱：`configure()` 在模块导入时就跑了一次，之后才放好的配置不会自动生效。构造这条消息本身不会抛异常——它跑在错误路径上。
+
+### 文档
+
+- **QMT Python 组件前置说明**（Issue #85）：全新安装的终端 `bin.x64\` 下没有 `Lib\` 目录，也没有 `python.exe`——那是 Python 组件带来的，不是终端自带的，不要手动创建。此前文档直接假设这些路径存在，还让往 `bin.x64\Lib\site-packages` 里拷包。
+- README 新增「配置向导」「单文件构建」两节；修正过期的常量计数（91 → 539，#73 之后）。
+
+### 已知限制
+
+- **信用委托类型仍会被塌缩成普通买卖**：PR #88 试图修这个，但其操作类型映射把 `33` / `34` 认成了专项融资买入/专项融券卖出——那两个实际是 `OPT_OPTION_SELL_CLOSE` / `OPT_OPTION_SELL_OPEN`（期权操作），专项信用是 `40` / `41`；另缺 9 个信用类型，含最基本的 `28 CREDIT_SLO_SELL`。已请求修改，本版未合入。
+- **`can_close_vol` 在股票账户上返回 LLONG_MAX 哨兵值**（Issue #84），沿自 0.2.11 的 #81。
+- **PR #82 的 `traded_price` 仍无实盘证据**（验证当日 0 笔委托），契约由单测钉住。
+- **单文件构建未在目标沙箱环境复现**：本机 QMT 不拒绝 `import redis`。生成、编译、配置正确性由测试钉住；受限券商环境里的真实加载由 @heimo88 实测（#76 已据此关闭）。
+- **PR #81 的接口尚未补全**：`EmptyPositionProvider` 与 `PositionProvider` 协议均缺 `get_position_statistics`。
+- **#77**（同终端双账户）属当前设计——每账户状态存放在模块级全局，两个实例共享 `sys.modules` 即互相覆盖。**#78** 待报告人补充环境信息。
+
+---
+
 ## [0.2.11] - 2026-08-27
 
 ### 新增
