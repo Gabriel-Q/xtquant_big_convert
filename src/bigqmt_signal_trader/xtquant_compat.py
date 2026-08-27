@@ -14,7 +14,16 @@ import threading
 import importlib
 import datetime as _dt
 from typing import Any, Dict, Iterable, List, Optional
-from xtquant.xtconstant import *
+# Only these three are used below, but every public constant is re-exported
+# further down: docs/XTQUANT_COMPAT_REPLACEMENT.md tells callers to do
+# ``from bigqmt_signal_trader import xtquant_compat as xtconstant`` and read
+# e.g. ``xtconstant.ORDER_SUCCEEDED`` off this module.
+#
+# This is deliberately not ``from xtquant.xtconstant import *``. That form is a
+# SyntaxError ("import * only allowed at module level") in the single-file QMT
+# builds, which exec each module inside a function body (issue #76).
+from xtquant import xtconstant as _xtconstant
+from xtquant.xtconstant import ORDER_UNKNOWN, STOCK_BUY, STOCK_SELL
 from xtquant.xttype import StockAccount
 
 from .full_tick_cache import request_full_tick_cache, wait_full_tick_cache
@@ -23,6 +32,21 @@ from .redis_rpc import call_redis_rpc
 from .logging_setup import get_logger
 
 log = get_logger("xtquant_compat")
+
+
+# Re-export every public xtconstant name on this module, replacing what
+# ``import *`` used to do implicitly. Before #73 these 110-odd constants were
+# defined here outright, and the documented "approach 1" migration path binds
+# this module as ``xtconstant``, so dropping them would break callers that read
+# e.g. ``xtquant_compat.FIX_PRICE``.
+#
+# Written as an explicit loop rather than ``import *`` (a SyntaxError inside the
+# single-file builds' function-scope exec, issue #76) and rather than a
+# module-level ``__getattr__`` (PEP 562, Python 3.7+, while QMT ships 3.6).
+for _const_name in dir(_xtconstant):
+    if not _const_name.startswith("_"):
+        globals().setdefault(_const_name, getattr(_xtconstant, _const_name))
+del _const_name
 
 
 # Default OHLCV fields pulled + cached by get_local_data fallback_rpc.
