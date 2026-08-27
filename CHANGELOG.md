@@ -2,6 +2,35 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
+## [0.2.11] - 2026-08-27
+
+### 新增
+
+- **`query_position_statistics` 持仓统计**（PR #81，@ReCodeLife）：对齐 MiniQMT 同名接口，服务端经 `get_trade_detail_data(..., "POSITION_STATISTICS")` 提供，43 个字段同时给出 snake_case 与 `m_` 两套名字。正确加入主线程方法名单——`get_trade_detail_data` 离开主线程返回空。**实盘验证推翻了 PR 描述的一个前提**：该接口在**股票账户**上也返回数据，不限期货。6 个持仓逐行核对：`position` 与 `query_stock_positions` 的持仓量 **6/6 完全一致**，8 组 `m_` 别名与 snake_case 全部吻合，17/43 字段有值（其余 26 个是期货专属的保证金/权利金字段，股票账户为空属正常）。
+- **委托回调带成交均价**（PR #82，@yuchiwang）：`traded_price`（成交均价）本就是原生 `XtOrder` 字段，但桥从未填充，导致 `on_stock_order` 在已成时拿不到成交价。服务端查询路径、回调 normalize、客户端 `_order_from_dict` 四层补齐并各带测试。提交者已实盘验证。
+
+### 修复
+
+- **单文件 QMT 沙箱构建无法加载：`from xtquant.xtconstant import *` 是语法错误**（Issue #76）：单文件构建把每个模块塞进函数体 exec，而 `import *` 只允许在模块级，报 `SyntaxError: import * only allowed at module level`。这是 0.2.10 里 #73 引入的——它删掉 `xtquant_compat` 中 110 个硬编码常量、改用 `import *` 兜住。
+
+  **只导入实际用到的 3 个名字会修好语法、同时弄坏别的东西**：`import *` 拉进 534 个名字，模块自身只用 `ORDER_UNKNOWN` / `STOCK_BUY` / `STOCK_SELL`，但 `docs/XTQUANT_COMPAT_REPLACEMENT.md` 记载的「接入方式一」是 `from bigqmt_signal_trader import xtquant_compat as xtconstant`，即调用方从本模块读常量。改为显式循环回填，**539/539 全部保留**并逐个与来源比对。没有使用模块级 `__getattr__`：PEP 562 是 Python 3.7+，而 QMT 自带 3.6（`bin.x64/python36.dll`）；4 个混合大小写常量（含原生 SDK 拼写的 `OFFSET_FLAG_ClOSEYESTERDAY`）也排除了按 `.isupper()` 过滤的写法。
+
+- **回调线程上首次导入模块失败，回调推送全丢**（Issue #76）：`exec_events` 之前是在 order/deal 回调**内部**导入的。QMT 的这些回调跑在经 `PyGILState_Ensure` 进入的 C++ 线程上，在该线程上首次 exec 一个尚未导入的模块会在 C 层失败**且不设置 Python 异常**，表现为 `SystemError: error return without exception set`。普通包部署不触发（init 期的 reload 已把它预热进 `sys.modules`，惰性导入直接命中缓存）；单文件沙箱构建里那次 `import_module` 会失败并被 `except` 吞掉，于是真的在回调线程上首载。改为模块加载期导入，走已在服务适配器模块的同一个本地 loader。
+
+  同时修掉**让这个 bug 藏了一天的原因**：handler 只记 `str(exc)`，日志读出来就是 `error return without exception set` 然后没了。现在带异常类与完整堆栈。
+
+- **adjust 主线程上一个未受控的调试 `print`**（#81 跟进，4c7d1cb）：PR #81 夹带了一段与其功能无关的调试输出。该文件其余 `print` 均受 `debug_log_limit`（默认 0）控制，这一处没有，因而每个响应都执行；且对**完整** payload 做 `json.dumps` 后才截断到 2000 字符。实测一个典型 `get_market_data_ex` 响应（100 支 × 240 根）序列化 2.6MB 耗时约 **30ms**、丢弃 99.92%——而它运行在 adjust 主线程上，实测 `tick_app` 11500 次调用的最大值才 29–42ms、p99.98 在 5ms 以内。
+
+### 已知限制
+
+- **`can_close_vol` 在股票账户上返回 LLONG_MAX 哨兵值**（Issue #84）：实盘 6 个持仓全部返回 `2^63-1`，即 QMT 对股票账户「未设置」的哨兵，被原样透传成一个真实数字；而本仓库 API 参考把 `m_nCanCloseVol` 记为 int「可平」。映射代码本身忠实转换了 QMT 给的值，问题在于哨兵未被识别。**这只有实盘数据能发现**，单测与代码审查都看不出来。
+- **PR #82 的 `traded_price` 尚无实盘证据**：验证当日 0 笔委托，该字段需**有成交的委托**才能证明。契约与四层往返由单测钉住。
+- **Issue #76 两项未完成验证**：报告人的单文件构建脚本依赖两个从未附带的模块（同 #56），**该构建无法在此复现**——`import *` 一项是通过「将模块源码放入函数体编译」钉住的，已确认该检查在修复前的代码上复现了报告人所报的 SyntaxError，但这不等同于跑过其真实构建；真实回调投递需实际下单才触发。已请报告人复测。
+- **PR #81 的接口尚未补全**：`EmptyPositionProvider` 与 `PositionProvider` 协议均缺 `get_position_statistics`（实测 `AttributeError`，会降级为 RPC 错误响应，不会中断线程）。
+- **#77**（同终端双账户）：现为一策略实例对应一账户——`_account_id` / `_rpc_service` / `_quote_subscription_service` 等每账户状态存放在模块级全局，RPC 通道亦按账户模板化，两个实例共享 `sys.modules` 即互相覆盖。属当前设计，非缺陷。**#78** 待报告人补充环境信息。
+
+---
+
 ## [0.2.10] - 2026-08-26
 
 ### 修复
