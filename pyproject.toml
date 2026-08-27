@@ -38,6 +38,9 @@ dev = [
     "pytest-cov>=4.0.0",
 ]
 
+[project.scripts]
+bigqmt-init = "bigqmt_signal_trader.init_config:main"
+
 [project.urls]
 Homepage = "https://github.com/litaolemo/xtquant_big_convert"
 Repository = "https://github.com/litaolemo/xtquant_big_convert.git"

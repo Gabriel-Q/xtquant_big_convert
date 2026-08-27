@@ -131,12 +131,17 @@ class ConfigBlockTest(unittest.TestCase):
 
 class EmbeddedContentTest(unittest.TestCase):
     def test_both_builds_embed_the_whole_package(self):
+        sys.path.insert(0, TOOLS)
+        import build_single_file
+
         package = os.path.join(ROOT, "src", "bigqmt_signal_trader")
         expected = sum(
             1
             for directory, dirs, files in os.walk(package)
             for name in files
-            if name.endswith(".py") and "__pycache__" not in directory
+            if name.endswith(".py")
+            and "__pycache__" not in directory
+            and name not in build_single_file.EXCLUDED_MODULES
         )
         for kind in BUILDERS:
             _path, source = build(kind)
@@ -144,6 +149,27 @@ class EmbeddedContentTest(unittest.TestCase):
             self.assertGreaterEqual(
                 found, expected, "%s build embedded %d of %d package modules"
                 % (kind, found, expected))
+
+    def test_setup_tooling_is_kept_out_of_the_strategy_builds(self):
+        """init_config imports subprocess and getpass. QMT's whitelist has
+        already rejected socket here, so setup tooling has no business riding
+        along in a file that runs inside the sandbox."""
+        for kind in BUILDERS:
+            _path, source = build(kind)
+            self.assertNotIn('"bigqmt_signal_trader/init_config.py"', source, kind)
+
+    def test_excluding_a_module_something_imports_fails_the_build(self):
+        """An earlier attempt at trimming this build excluded a module that was
+        imported at the top level of another, and it died on load instead of at
+        build time."""
+        sys.path.insert(0, TOOLS)
+        import build_single_file
+
+        with self.assertRaises(SystemExit):
+            build_single_file.collect_package(
+                build_single_file.PACKAGE_DIR,
+                os.path.join(build_single_file.ROOT, "src"),
+                excluded=("redis_common.py",))
 
     def test_constant_backfill_survives_the_indentation_pass(self):
         """The flat builder re-indents sources into function bodies; the #76

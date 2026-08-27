@@ -18,11 +18,40 @@ OUT_PATH = os.environ.get(
     "BIGQMT_BUILD_OUT", os.path.join(ROOT, "src", "BIGQMT_REDIS_DRYRUN_ALL_IN_ONE.py"))
 
 
-def collect_package(pkg_dir, root):
+# Setup-time tooling, not runtime code. Keeping it out is not just about size:
+# it imports subprocess and getpass, and this project has already been bitten by
+# QMT's import whitelist (socket, and logging.handlers -> socket indirectly).
+# An unimported module's imports never execute, so this is belt-and-braces --
+# but the belt is cheap.
+EXCLUDED_MODULES = ("init_config.py",)
+
+
+def _assert_unused(pkg_dir, excluded):
+    """Refuse to exclude a module something else imports.
+
+    A previous attempt at trimming this build excluded a module that turned out
+    to be imported at the top level of another one, and the build died on load
+    rather than at build time.
+    """
+    stems = [name[:-3] for name in excluded]
+    for dirpath, _dirnames, filenames in os.walk(pkg_dir):
+        for fn in sorted(filenames):
+            if not fn.endswith(".py") or fn in excluded:
+                continue
+            with open(os.path.join(dirpath, fn), "rb") as f:
+                text = f.read().decode("utf-8", "replace")
+            for stem in stems:
+                if ("import %s" % stem) in text or ("from .%s" % stem) in text:
+                    raise SystemExit(
+                        "refusing to exclude %s.py: %s imports it" % (stem, fn))
+
+
+def collect_package(pkg_dir, root, excluded=EXCLUDED_MODULES):
+    _assert_unused(pkg_dir, excluded)
     sources = {}
     for dirpath, _dirnames, filenames in os.walk(pkg_dir):
         for fn in sorted(filenames):
-            if not fn.endswith(".py"):
+            if not fn.endswith(".py") or fn in excluded:
                 continue
             full = os.path.join(dirpath, fn)
             rel = os.path.relpath(full, root).replace("\\", "/")

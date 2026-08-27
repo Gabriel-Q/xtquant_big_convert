@@ -14,6 +14,42 @@
 
 ---
 
+### 配置向导：`bigqmt-init`
+
+不想手动抄两份 `.example.py`、也不想搞清楚三十来个键里哪些真的要改，直接跑：
+
+```bash
+bigqmt-init
+```
+
+或者从源码检出运行：
+
+```bash
+python -m bigqmt_signal_trader.init_config
+```
+
+问几个问题——资金账号、账号类型、传输方式（redis / zmq）、地址端口、Redis 用户名密码、是否允许远程下单、部署方式——然后把配置写出来：
+
+| 文件 | 位置 | 作用 |
+|---|---|---|
+| `bigqmt_signal_trader_local_config.py` | QMT 的 python 目录 | 服务端（QMT 内） |
+| `bigqmt_signal_trader_client_config.py` | 你指定的目录 | 客户端（外部程序） |
+| `BIGQMT_*_ALL_IN_ONE.py` | QMT 的 python 目录 | 选了单文件部署时，配置已烘焙进去 |
+
+服务端和客户端两份配置由同一组答案生成，**连接参数不会对不上**。
+
+几个不问、直接定死的选项：
+
+- **`rpc_background_threads` 恒为 `False`** —— `get_trade_detail_data` 离开主策略线程返回空，这不是可选项
+- **`rpc_allow_order_methods` 默认 `False`** —— 打开前会明确提示：任何能连上这条通道的程序都可以下单
+- 选了**无 redis 单文件**会自动把传输改成 zmq，不会留下一份声称用 redis 的配置
+
+已存在的文件会先问再覆盖（`--force` 跳过询问）。
+
+> **密码分两类。** Redis 密码是服务凭据，写进配置文件（`.example.py` 本来就是这么记的），输入时不回显。**QMT 登录密码不落盘**——`qmt_launcher` 从环境变量 `BIGQMT_LOGIN_PASSWORD` 读，这样它不会出现在 `argv` 或磁盘文件里，`bigqmt-init` 沿用这个约定。
+>
+> 生成的文件带账号和凭据，**不要提交到版本库**。
+
 ## 功能一览
 
 ### RPC 接口（远程可调用）
@@ -523,6 +559,8 @@ cd D:\国金证券QMT交易端
 ## 快速开始
 
 > 前置：客户端已按上面「A. 客户端」装好包；服务端按「B. 服务端」装好所选传输的依赖。下面是从零跑通整套流程的步骤。
+>
+> 只想把配置生成出来的话，跑 [`bigqmt-init`](#配置向导bigqmt-init) 即可——第 3 步的两份配置它会替你写好，选单文件部署还会顺带把构建也做了。
 
 ### 第 1 步：同步代码到 QMT 的 python 目录
 
