@@ -2820,6 +2820,9 @@ class BigQmtXtTrader:
             order_volume=_safe_int(item.get("volume", item.get("order_volume"))),
             traded_volume=_safe_int(item.get("traded_volume")),
             price=_safe_float(item.get("price")),
+            traded_price=_safe_float(
+                item.get("traded_price", item.get("avg_traded_price", item.get("m_dTradedPrice")))
+            ),
             order_sysid=order_sysid,
             order_id=order_sysid or str(item.get("user_order_id") or ""),
             strategy_name=str(item.get("strategy_name") or ""),

@@ -286,6 +286,7 @@ _RAW_SNAPSHOT_EXTRA_FIELDS = (
     "order_sysid",
     "order_sys_id",
     "trade_id",
+    "traded_price",
     "traded_id",
     "strategy_name",
     "strategyName",
@@ -368,6 +369,9 @@ def normalize_order_event(order, account_id=""):
         ),
         "traded_volume": _attr(order, ["m_nVolumeTraded", "traded_volume"]),
         "price": _attr(order, ["m_dLimitPrice", "price", "limit_price"]),
+        "traded_price": _attr(
+            order, ["m_dTradedPrice", "traded_price", "avg_traded_price"]
+        ),
         "status": _attr(order, ["m_nOrderStatus", "order_status", "status"]),
         "direction": direction,
         "action": _action_from_direction(direction),

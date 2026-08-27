@@ -268,6 +268,7 @@ class OrderSnapshot:
         remark="",
         order_time=0,
         status_msg="",
+        traded_price=0.0,
     ):
         self.order_sys_id = order_sys_id
         self.user_order_id = user_order_id
@@ -277,6 +278,7 @@ class OrderSnapshot:
         self.traded_volume = traded_volume
         self.status = status
         self.price = price
+        self.traded_price = traded_price
         self.strategy_name = strategy_name
         self.remark = remark
         # 报单时间, Unix 秒 -- MiniQMT XtOrder.order_time 的语义。0 = 未上报。

@@ -271,6 +271,8 @@ class BigQmtAdaptersTest(unittest.TestCase):
                     m_nVolumeTotalOriginal=1000,
                     m_nVolumeTraded=200,
                     m_nOrderStatus=50,
+                    m_dLimitPrice=10.12,
+                    m_dTradedPrice=10.05,
                 )
             ]
 
@@ -290,6 +292,8 @@ class BigQmtAdaptersTest(unittest.TestCase):
         self.assertEqual(orders[0].stock_code, "000001.SZ")
         self.assertEqual(orders[0].action, "SELL")
         self.assertEqual(orders[0].traded_volume, 200)
+        self.assertEqual(orders[0].price, 10.12)
+        self.assertEqual(orders[0].traded_price, 10.05)
 
     def test_query_trades_without_strategy_omits_strategy_filter(self):
         calls = []
