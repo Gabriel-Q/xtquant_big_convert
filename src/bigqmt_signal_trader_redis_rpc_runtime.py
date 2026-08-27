@@ -128,11 +128,53 @@ except Exception:
 try:
     from bigqmt_signal_trader_local_config import BIGQMT_ACCOUNT_TYPE
 except Exception:
-    BIGQMT_ACCOUNT_TYPE = "STOCK"
+    BIGQMT_ACCOUNT_TYPE = ""
 
 ACCOUNT_ID = str(BIGQMT_ACCOUNT_ID or ACCOUNT_ID or "")
-# 账号类型：只从独立变量 BIGQMT_ACCOUNT_TYPE 读取，默认 STOCK
-ACCOUNT_TYPE = str(BIGQMT_ACCOUNT_TYPE or ACCOUNT_TYPE or "STOCK").strip().upper()
+
+# Account type. A credit account read as STOCK returns an all-zero asset row
+# rather than an error, so getting this wrong is silent (issue #92).
+#
+# Three places look plausible and only one used to work:
+#   - BIGQMT_ACCOUNT_TYPE in the local config          -- worked
+#   - account_type inside BIGQMT_REDIS_CONFIG          -- was ignored
+#   - editing ACCOUNT_TYPE in this file                -- silently overwritten
+#     below, because the shipped example config sets BIGQMT_ACCOUNT_TYPE.
+# Both of the others are now honoured, and the resolved value is printed at
+# startup so a setting that did not take effect is visible instead of showing
+# up later as zero assets.
+# The constant above ships as "STOCK", so it only counts as something the user
+# chose once it has been edited away from that; otherwise every credit setup
+# would report a phantom conflict with it.
+_ACCOUNT_TYPE_EDITED_HERE = ACCOUNT_TYPE if ACCOUNT_TYPE != "STOCK" else ""
+_account_type_sources = [
+    ("BIGQMT_ACCOUNT_TYPE", BIGQMT_ACCOUNT_TYPE),
+    ("BIGQMT_REDIS_CONFIG['account_type']", BIGQMT_REDIS_CONFIG.get("account_type")),
+    ("ACCOUNT_TYPE in bigqmt_signal_trader_redis_rpc_runtime.py",
+     _ACCOUNT_TYPE_EDITED_HERE),
+]
+ACCOUNT_TYPE_SOURCE = "default"
+ACCOUNT_TYPE = "STOCK"
+for _source_name, _source_value in _account_type_sources:
+    if _source_value:
+        ACCOUNT_TYPE = str(_source_value).strip().upper()
+        ACCOUNT_TYPE_SOURCE = _source_name
+        break
+
+
+def _report_account_type():
+    """Say which account type won and where it came from."""
+    print("[bigqmt_shell] account_type=%s (from %s)" % (ACCOUNT_TYPE, ACCOUNT_TYPE_SOURCE))
+    conflicting = [
+        name for name, value in _account_type_sources
+        if value and str(value).strip().upper() != ACCOUNT_TYPE
+    ]
+    if conflicting:
+        print("[bigqmt_shell] ignored conflicting account_type from: %s"
+              % ", ".join(conflicting))
+
+
+_report_account_type()
 REDIS_HOST = BIGQMT_REDIS_CONFIG.get("host", REDIS_HOST)
 REDIS_PORT = int(BIGQMT_REDIS_CONFIG.get("port", REDIS_PORT))
 REDIS_DB = int(BIGQMT_REDIS_CONFIG.get("db", REDIS_DB))
