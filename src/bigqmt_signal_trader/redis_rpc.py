@@ -702,6 +702,11 @@ class BigQmtRpcHandlers:
         except Exception:
             return []
 
+    def _configured_account_type(self):
+        return str(
+            getattr(self.order_gateway, "account_type", "CREDIT") or "CREDIT"
+        ).strip().upper()
+
     def _query_trade_detail(self, params, detail_type, strategy_name=""):
         """get_trade_detail_data with one of the 6 official detail types.
 
@@ -733,7 +738,11 @@ class BigQmtRpcHandlers:
 
     def _handle_query_stk_compacts(self, params):
         # 未平仓合约（负债）— 官方 get_unclosed_compacts
-        return self._call_qmt_global("get_unclosed_compacts", self._request_account_id(params))
+        return self._call_qmt_global(
+            "get_unclosed_compacts",
+            self._request_account_id(params),
+            self._configured_account_type(),
+        )
 
     def _handle_query_credit_subjects(self, params):
         # 融资标的（担保品）— 官方 get_assure_contract
@@ -796,10 +805,18 @@ class BigQmtRpcHandlers:
         return self._call_qmt_global("get_enable_short_contract", self._request_account_id(params))
 
     def _handle_get_unclosed_compacts(self, params):
-        return self._call_qmt_global("get_unclosed_compacts", self._request_account_id(params))
+        return self._call_qmt_global(
+            "get_unclosed_compacts",
+            self._request_account_id(params),
+            self._configured_account_type(),
+        )
 
     def _handle_get_closed_compacts(self, params):
-        return self._call_qmt_global("get_closed_compacts", self._request_account_id(params))
+        return self._call_qmt_global(
+            "get_closed_compacts",
+            self._request_account_id(params),
+            self._configured_account_type(),
+        )
 
     def _handle_get_debt_contract(self, params):
         return self._call_qmt_global("get_debt_contract", self._request_account_id(params))
