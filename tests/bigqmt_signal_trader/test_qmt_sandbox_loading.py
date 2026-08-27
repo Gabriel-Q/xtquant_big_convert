@@ -48,12 +48,16 @@ class FunctionScopeCompileTest(unittest.TestCase):
     def test_no_star_import_anywhere_in_the_bundled_package(self):
         """One star import is all it takes to break the build again."""
         offenders = []
-        for directory, _dirs, files in os.walk(SRC):
+        for directory, dirs, files in os.walk(SRC):
+            dirs[:] = [d for d in dirs if d != "__pycache__"]
             for name in files:
-                if not name.endswith(".py"):
+                # Generated single-file builds are artifacts, not sources, and
+                # the flat one is written as GBK. tests/test_single_file_build.py
+                # scans those with the right encoding.
+                if not name.endswith(".py") or name.endswith("_ALL_IN_ONE.py"):
                     continue
                 path = os.path.join(directory, name)
-                with io.open(path, encoding="utf-8") as handle:
+                with io.open(path, encoding="utf-8", errors="replace") as handle:
                     for lineno, line in enumerate(handle, 1):
                         if line.lstrip().startswith("from ") and line.rstrip().endswith(
                             "import *"

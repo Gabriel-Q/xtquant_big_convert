@@ -14,6 +14,42 @@
 
 ---
 
+### 配置向导：`bigqmt-init`
+
+不想手动抄两份 `.example.py`、也不想搞清楚三十来个键里哪些真的要改，直接跑：
+
+```bash
+bigqmt-init
+```
+
+或者从源码检出运行：
+
+```bash
+python -m bigqmt_signal_trader.init_config
+```
+
+问几个问题——资金账号、账号类型、传输方式（redis / zmq）、地址端口、Redis 用户名密码、是否允许远程下单、部署方式——然后把配置写出来：
+
+| 文件 | 位置 | 作用 |
+|---|---|---|
+| `bigqmt_signal_trader_local_config.py` | QMT 的 python 目录 | 服务端（QMT 内） |
+| `bigqmt_signal_trader_client_config.py` | 你指定的目录 | 客户端（外部程序） |
+| `BIGQMT_*_ALL_IN_ONE.py` | QMT 的 python 目录 | 选了单文件部署时，配置已烘焙进去 |
+
+服务端和客户端两份配置由同一组答案生成，**连接参数不会对不上**。
+
+几个不问、直接定死的选项：
+
+- **`rpc_background_threads` 恒为 `False`** —— `get_trade_detail_data` 离开主策略线程返回空，这不是可选项
+- **`rpc_allow_order_methods` 默认 `False`** —— 打开前会明确提示：任何能连上这条通道的程序都可以下单
+- 选了**无 redis 单文件**会自动把传输改成 zmq，不会留下一份声称用 redis 的配置
+
+已存在的文件会先问再覆盖（`--force` 跳过询问）。
+
+> **密码分两类。** Redis 密码是服务凭据，写进配置文件（`.example.py` 本来就是这么记的），输入时不回显。**QMT 登录密码不落盘**——`qmt_launcher` 从环境变量 `BIGQMT_LOGIN_PASSWORD` 读，这样它不会出现在 `argv` 或磁盘文件里，`bigqmt-init` 沿用这个约定。
+>
+> 生成的文件带账号和凭据，**不要提交到版本库**。
+
 ## 功能一览
 
 ### RPC 接口（远程可调用）
@@ -51,7 +87,7 @@
 
 - `bigqmt_signal_trader.xtquant_compat`：把旧代码的 `xt_trader` / `xtdata` 调用转成 RPC，无需改业务代码。
 - 兼容 MiniQMT 方法名：`query_stock_asset` / `query_stock_positions` / `query_stock_orders` / `get_full_tick` / `order_stock` 等。
-- **完整 xtconstant 枚举**（91 个常量，对齐原生 MiniQMT）：账号类型、委托类型（股票/期货/信用/期权）、报价类型、委托状态、账号状态、`ORDER_TYPE_SET`。
+- **完整 xtconstant 枚举**（539 个常量，涵盖原生 MiniQMT 全部 90 个，值逐一比对无改动）：账号类型、委托类型（股票/期货/信用/期权）、报价类型、委托状态、账号状态、`ORDER_TYPE_SET`。
 
 ```python
 # 旧代码零改动（自动命中 shim）
@@ -307,6 +343,32 @@ QMT 原生安装、逐 Bar 同步协议、CSV 备用模式和安全边界见
 
 **用法**：QMT 策略编辑器加载 `BIGQMT_DRYRUN_NO_REDIS.py`（同步到 QMT 目录时用这个文件名），RPC 走纯 ZMQ，零 redis 依赖。其余功能（行情/交易/持仓查询）与标准版一致。
 
+### 单文件构建（QMT 沙箱禁止加载外部文件时用）
+
+部分券商的 QMT 更严：**白名单 + 不能加载文件、不能 import 外部模块**，只有把所有代码放进**一个策略文件**才能跑（Issue #56）。`tools/` 下两个生成器负责把整个包打成一个自包含文件：
+
+```bash
+python tools/build_single_file.py
+python tools/build_no_redis_single_file_flat.py
+```
+
+| 生成器 | 产物 | 内嵌方式 | 用于 |
+|---|---|---|---|
+| `build_single_file.py` | `src/BIGQMT_REDIS_DRYRUN_ALL_IN_ONE.py` | base64 | redis / zmq 均可 |
+| `build_no_redis_single_file_flat.py` | `src/BIGQMT_DRYRUN_NO_REDIS_FLAT_ALL_IN_ONE.py` | **明文真实代码** | 沙箱拒绝 `import redis` 时，强制 ZMQ |
+
+两者都内嵌 `bigqmt_signal_trader` 全部子模块 + `bigqmt_signal_trader_strategy` + `bigqmt_signal_trader_redis_rpc_runtime`，运行时用自定义 import 钩子从内存解析，**不从磁盘 import 任何自定义模块**；只依赖标准库和第三方库（redis / zmq / pandas）。
+
+**flat 版**把每个模块缩进进 `def _mod_N():` 函数体、再用其 `__code__` 在独立模块命名空间里 exec，所以内嵌源码在生成文件里**可搜索、可阅读、可直接改**，IDE 也能高亮跳转。它处理了两个坑：用 tokenize 保护多行字符串内部不被缩进改动；用 AST 收集模块级绑定名并在函数体开头注入 `global`，否则被嵌套函数闭包引用的模块级名字会变成 cell 变量，与 `global` 更新的模块 dict 失去同步。
+
+> 函数体 exec 也正是 `from X import *` 变成 `SyntaxError: import * only allowed at module level` 的原因（Issue #76）。整个包因此不允许出现星号导入，`tests/test_single_file_build.py` 会守住这条。
+
+**用法**：编辑生成文件顶部的 config block（`BIGQMT_ACCOUNT_ID` / `BIGQMT_ACCOUNT_TYPE` / `BIGQMT_REDIS_CONFIG`），把这**一个文件**拷进 QMT 的 python 目录当策略加载即可，不需要一并拷贝整个包。默认值与 `src/bigqmt_signal_trader_local_config.example.py` 保持一致——**`rpc_allow_order_methods` 默认为 `False`**，需要远程下单/撤单时才显式打开。
+
+产物约 900KB / 700KB，已加入 `.gitignore`——**用时重新生成，不要提交**。改动包内代码后需重新运行生成器。
+
+感谢 @heimo88 提供这两个脚本并在其券商环境实测。
+
 ### 委托/成交查询的 strategy_name 陷阱（重要）
 
 `get_trade_detail_data` 按 `strategy_name` 过滤委托/成交——**下单时用的 strategy_name 必须和查询时一致**，否则查不到。
@@ -497,6 +559,8 @@ cd D:\国金证券QMT交易端
 ## 快速开始
 
 > 前置：客户端已按上面「A. 客户端」装好包；服务端按「B. 服务端」装好所选传输的依赖。下面是从零跑通整套流程的步骤。
+>
+> 只想把配置生成出来的话，跑 [`bigqmt-init`](#配置向导bigqmt-init) 即可——第 3 步的两份配置它会替你写好，选单文件部署还会顺带把构建也做了。
 
 ### 第 1 步：同步代码到 QMT 的 python 目录
 
