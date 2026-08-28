@@ -1013,15 +1013,18 @@ def _run_daily_ipo(ContextInfo):
       - get_ipo_data("STOCK") 拿当日可申购新股 (已验证在 QMT 端返回正确数据)
       - 对每只 passorder(23, 1101, account, code, 11, 发行价, maxPurchaseNum)
     passorder 由 QMT 运行时注入全局; account 用 _account_id.
-    幂等: _ipo_done_date 记录当天已打新, 避免 adjust 每周期重复申购.
+    幂等: _ipo_done_date 在函数最开头就标记当天, 无论成功失败当天只执行一次
+    (8-28 教训: 原实现末尾才设置, 中间异常导致 adjust 重复触发 -> 重复申购,
+     第二条被拒 "委托重复申购").
     """
     global _ipo_done_date
     from datetime import datetime as _dt
 
+    today = _dt.now().strftime("%Y%m%d")
+    if _ipo_done_date == today:
+        return
+    _ipo_done_date = today   # 前置标记: 幂等 (当天只试一次)
     try:
-        today = _dt.now().strftime("%Y%m%d")
-        if _ipo_done_date == today:
-            return
         get_ipo_data = _resolve_runtime_name("get_ipo_data")
         if get_ipo_data is None:
             print("[ipo] get_ipo_data 未绑定 (QMT 未注入), 跳过打新")
@@ -1042,7 +1045,6 @@ def _run_daily_ipo(ContextInfo):
             return
         if not ipo:
             print("[ipo] 今日无新股可申购")
-            _ipo_done_date = today
             return
 
         print("[ipo] 今日可申购 %d 只新股:" % len(ipo))
@@ -1061,7 +1063,6 @@ def _run_daily_ipo(ContextInfo):
                     code, info.get("name", ""), max_num, price))
             except Exception as exc:
                 print("[ipo] %s 申购异常: %s" % (code, exc))
-        _ipo_done_date = today
         print("[ipo] 今日打新完成")
     except Exception as exc:
         print("[ipo] 打新流程异常: %s" % exc)
