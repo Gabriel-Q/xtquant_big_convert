@@ -757,8 +757,11 @@ class BigQmtRpcHandlers:
         return self._call_qmt_global("get_assure_contract", self._request_account_id(params))
 
     def _handle_query_appointment_info(self, params):
-        # 新股数据 — 官方 get_ipo_data
-        return self._call_qmt_global("get_ipo_data", self._request_account_id(params))
+        # 新股数据 — 官方 get_ipo_data(type)
+        # 8-28 修复: 原实现把 account_id 当第一个参数传给 get_ipo_data (期望 type),
+        # 导致返回 [{}]. 改为透传 type 参数 ("STOCK"/"BOND"/缺省全部).
+        return self._call_qmt_global(
+            "get_ipo_data", str(params.get("type") or params.get("stock_type") or ""))
 
     def _handle_query_smt_secu_info(self, params):
         # 期权标的持仓 — 官方 get_option_subject_position
@@ -783,7 +786,9 @@ class BigQmtRpcHandlers:
         return self._call_qmt_global("get_last_order_id", self._request_account_id(params))
 
     def _handle_get_ipo_data(self, params):
-        return self._call_qmt_global("get_ipo_data", self._request_account_id(params))
+        # 8-28 修复: get_ipo_data(type) 期望 type 参数, 原错传 account_id -> [{}]
+        return self._call_qmt_global(
+            "get_ipo_data", str(params.get("type") or params.get("stock_type") or ""))
 
     def _handle_get_new_purchase_limit(self, params):
         return self._call_qmt_global("get_new_purchase_limit", self._request_account_id(params))

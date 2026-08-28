@@ -2775,8 +2775,21 @@ class BigQmtXtTrader:
         except Exception:
             return []
 
-    def query_ipo_data(self, account=None):
-        return self._query_account_list(account, "query_appointment_info")
+    def query_ipo_data(self, account=None, stock_type=""):
+        """新股申购信息 (大 QMT get_ipo_data).
+        stock_type: "" 全部, "STOCK" 新股, "BOND" 新债.
+        8-28 修复: 直接调 get_ipo_data 带 type 参数 (原走 query_appointment_info
+        传 account_id 导致返回空)."""
+        account_id = _account_id(account, self.client.account_id)
+        try:
+            data = self.client.call(
+                "get_ipo_data",
+                {"type": stock_type},
+                account_id=account_id,
+            )
+            return data or []
+        except Exception:
+            return []
 
     def query_new_purchase_limit(self, account):
         """新股申购额度 (大 QMT get_new_purchase_limit).
