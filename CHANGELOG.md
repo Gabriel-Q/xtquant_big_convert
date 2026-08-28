@@ -2,6 +2,56 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
+## [0.2.14] - 2026-08-28
+
+### 新增
+
+- **新股申购（打新）接口**（PR #96 @ThomasAnderson01，PR #98 跟进）：`query_ipo_data` / `ipo_subscribe` / `ipo_subscribe_all` / `query_new_purchase_limit`。
+
+  ```python
+  for row in xt_trader.ipo_subscribe_all(acc, dry_run=True):   # 先看计划，不下单
+      print(row)
+  results = xt_trader.ipo_subscribe_all(acc)                    # 真申购
+  ```
+
+  **这是主动调用的方法，不是桥自动执行的行为。** 提交版本在 `adjust` 定时回调里无条件运行——整个 diff 没有任何开关，任何人升级后第二天 09:40 就会自动下真实委托，而且直接调 `passorder`，**绕过 `rpc_allow_order_methods=False`**：明确关掉远程下单的用户照样会被下单。改为显式接口后走既有 `order_stock` 通道，因而与其他委托一样受该开关管控。
+
+  走既有通道还顺带修正了 `quickTrade`：被删的手写路径传 `1`，而 API 参考 1.4 明确要求**定时器/回调中下单必须传 2**（`1` 的语义是 `is_last_bar()` 为真才产生信号，在定时器回调里可能不成立，**委托会静默不发出**）。网关默认值本就是 `orderType 1101` / `prType 11` / `quickTrade 2`。
+
+  **默认只打沪深**（市值申购、不冻结资金），北交所需冻结资金故排除，可用 `markets=("SH","SZ","BJ")` 显式打开。**申购代码认不出来一律跳过**——原实现结尾是 `return True`（"无法识别默认放行"），在一个专门排除北交所的过滤器上倾向于下单。
+
+### 修复
+
+- **`get_ipo_data` 的响应被清空**（实盘发现）：它返回**以申购代码为键的 dict**，却被送进 `_normalize_detail_rows`。那个函数对 dict 做 `for row in rows`——迭代的是**键**，再拿每个代码字符串去抓属性：
+
+  ```
+  QMT 返回:  {'301689.SZ': {'issuePrice': 16.0, 'maxPurchaseNum': 12000, ...}}
+  归一化后:  [{}]              <- 申购代码、发行价、数量，全没了
+  ```
+
+  PR #96 修对了 `type` 参数（原将 `account_id` 传给了期望 `type` 的位置），但数据死在下一层，**所以这个 RPC 从未返回过可用数据**。
+
+  实盘还证明了数据确实存在而非"今天没有新股"：该函数对空输入 `return []`，而服务端 `type="STOCK"` 返回 `[{}]`、`"BOND"` 返回 `[]`——非空 dict 被清空。修复后同一调用返回 `301689.SZ @ 16.0 × 12000`，与 #96 提交者当日上午实盘申购的完全一致。
+
+  `get_new_purchase_limit` 文档（6.10）同样写明返回 dict，同样的问题，一并修。两者现走 `_call_qmt_mapping`：保留映射形状，只把值转成 JSON 安全。
+
+- **客户端不再静默吞掉错误形状的响应**：跟进过程中一度用 `isinstance(data, dict) else {}` 归一化空值，那会把 `[{}]` 变成 `{}` = 「今天没有新股」——而当天恰好有。现在非空却形状不对会明确告警说服务端太旧。
+
+### 文档
+
+- README 新增「新股申购（打新）」一节，并**明确写明该接口不会自动执行**——否则读者看到"打新"容易以为装上就会自己跑。文中每个方法名、关键字参数、申购代码前缀均已对照实现核实。
+
+### 已知限制
+
+- **真实申购未验证**：只读与 `dry_run` 路径已在大 QMT 实盘验证（2026-08-28，`301689.SZ @ 16.0 × 12000` 计划正确、未下单），但 `dry_run=False` 会下真实委托，本仓库未执行。@ThomasAnderson01 曾用原实现于当日成功申购该股。
+- **`query_new_purchase_limit` 实盘返回空 dict**：本账户无申购额度，属正常；形状已修正为 dict（此前为 list）。
+- **期货合约符号大小写**（Issue #95）修复见 PR #97，**本版未合入**，待报告人确认其终端的期货数据情况。
+- **信用委托类型仍会被塌缩成普通买卖**：PR #88 的映射把 `33`/`34` 认成专项融资/融券（实为期权操作，专项信用是 `40`/`41`），另缺 9 个类型含最基本的 `28 CREDIT_SLO_SELL`。已请求修改，未合入。
+- **`subscribe_quote` 不是真订阅**：回调只触发一次，之后无推送。需要实时推送请用 `subscribe_whole_quote`。
+- `can_close_vol` 哨兵值（#84）、单文件构建需源码检出、`EmptyPositionProvider` 缺 `get_position_statistics`、#77/#78 —— 同 0.2.13。
+
+---
+
 ## [0.2.13] - 2026-08-27
 
 ### 修复
