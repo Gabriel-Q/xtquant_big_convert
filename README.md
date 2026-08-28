@@ -73,7 +73,7 @@ python -m bigqmt_signal_trader.init_config
 | **因子/模型** | `call_formula` / `subscribe_formula` / `unsubscribe_formula` / `get_formula_result` / `gen_factor_index` |
 | **时间转换** | `datetime_to_timetag` / `timetag_to_datetime` / `timetagToDateTime`（纯本地计算）|
 | **账户查询** | `get_asset`（资金）/ `get_positions`（持仓）/ `query_stock_position`（单股持仓）/ `query_orders`（委托）/ `query_trades`（成交）/ `get_history_trade_detail_data`（历史成交）/ `get_value_by_order_id` / `get_last_order_id` |
-| **新股/打新** | `get_ipo_data` / `get_new_purchase_limit` |
+| **新股/打新** | `get_ipo_data`（返回以申购代码为键的 dict）/ `get_new_purchase_limit`；客户端另有 `query_ipo_data` / `ipo_subscribe` / `ipo_subscribe_all`，见下文 |
 | **融资融券** | `get_assure_contract`（担保品）/ `get_enable_short_contract`（融券标的）/ `get_unclosed_compacts`（未平仓）/ `get_closed_compacts`（已平仓）/ `get_debt_contract`（负债）—— 需两融权限，普通账户降级为空 |
 | **期权持仓** | `get_option_subject_position`（标的持仓）/ `get_comb_option`（组合期权）|
 | **持仓同步** | `sync_positions`（写回 Redis 供客户端缓存）|
@@ -164,6 +164,50 @@ seq = xt_trader.query_stock_orders_async(acc)
 ```
 
 **注意**：QMT 必须运行在**实盘模式**（非模拟/模型交易）才能收到完整回报。模拟模式下委托进 QMT 界面但不在真实委托队列，`query_orders` 查不到、`order_stock` 返回 -1（触发 `on_order_error`）。
+
+### 新股申购（打新）
+
+```python
+from bigqmt_signal_trader.xtquant_compat import xt_trader, StockAccount
+acc = StockAccount("你的账号")
+
+# 1) 看今天有什么可申购（只读）
+for code, info in xt_trader.query_ipo_data(acc, stock_type="STOCK").items():
+    print(code, info["name"], info["issuePrice"], info["maxPurchaseNum"])
+# 301689.SZ  某某科技  16.0  12000
+
+# 2) 先看计划，不下单
+for row in xt_trader.ipo_subscribe_all(acc, dry_run=True):
+    print(row)
+# {'stock_code': '301689.SZ', 'action': 'planned', 'volume': 12000, 'price': 16.0, ...}
+
+# 3) 真申购（沪深；北交所默认排除）
+results = xt_trader.ipo_subscribe_all(acc)
+```
+
+每只返回 `action`（`subscribed` / `planned` / `skipped` / `failed`）与 `reason`，一只失败不影响其余。
+
+**这是一个你主动调用的方法，不是桥自己会做的事。** 它会下真实委托，所以必须是当天有人明确要求，而不是升级后自动发生。要每天定时打新，请在你自己的程序里调度它。
+
+因为走的是既有的 `order_stock` 通道，它自动获得：
+
+| | |
+|---|---|
+| `rpc_allow_order_methods` | 和其他委托一样保持 opt-in，默认关 |
+| `orderType 1101` / `prType 11` / `quickTrade 2` | 网关默认值 —— `quickTrade` 必须是 2，见 API 参考 1.4：定时器/回调中下单传 1 可能静默不发出 |
+| 主线程执行、委托记账、exec 事件 | 与普通下单完全一致 |
+
+**默认只打沪深。** 沪深打新是市值申购、不冻结资金；北交所需要冻结资金，因此默认排除。需要时显式打开：
+
+```python
+xt_trader.ipo_subscribe_all(acc, markets=("SH", "SZ", "BJ"))
+```
+
+**申购代码无法识别时会跳过，不会猜。** 申购代码有自己的编号（沪 `730/732/780/787/789`，深 `00/30`，北 `920/889/8/4`），认不出来的代码一律跳过——在一个会下单的路径上，猜错的代价不对称。
+
+`query_new_purchase_limit(acc)` 返回各板块申购额度（dict）。
+
+> 实盘验证到 `dry_run` 为止：`query_ipo_data` 与申购计划均已在大 QMT 上验证正确（2026-08-28，301689.SZ @ 16.0 × 12000）。**真实申购会下真实委托，未在本仓库验证过。**
 
 ### 全推行情订阅（subscribe_whole_quote 真推送）
 
