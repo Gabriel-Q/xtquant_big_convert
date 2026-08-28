@@ -138,6 +138,7 @@ LISTENER_DEFERRED_METHODS = {
     "query_credit_slo_code",
     "query_credit_assure",
     "query_appointment_info",
+    "get_ipo_data",   # 8-28: 交易类查询, 需主线程上下文 (后台线程返回空)
     "query_smt_secu_info",
     "query_smt_secu_rate",
     "get_value_by_order_id",
