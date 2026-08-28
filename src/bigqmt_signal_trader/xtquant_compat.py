@@ -2817,10 +2817,21 @@ class BigQmtXtTrader:
                 {"type": stock_type},
                 account_id=account_id,
             )
-            # get_ipo_data answers with a dict keyed by subscription code; an
-            # empty list here would break a caller doing .items() on the
-            # no-IPOs-today path, which is most days.
-            return data if isinstance(data, dict) else {}
+            # get_ipo_data answers with a dict keyed by subscription code.
+            if isinstance(data, dict):
+                return data
+            if data:
+                # Non-empty and not a dict: an older server is still routing
+                # this through the detail-row normaliser, which iterates the
+                # dict by key and discards every value -- real IPOs arrive as
+                # [{}, {}]. Coercing that to {} silently reports "no IPOs
+                # today", so say so instead of swallowing it.
+                log.warning(
+                    "query_ipo_data: server returned %s, not a mapping -- the "
+                    "QMT-side bridge is too old to preserve get_ipo_data's "
+                    "shape and the rows are empty. Update the server side.",
+                    type(data).__name__)
+            return {}
         except Exception:
             return {}
 

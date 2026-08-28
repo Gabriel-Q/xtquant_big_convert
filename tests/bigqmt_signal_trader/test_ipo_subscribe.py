@@ -194,3 +194,67 @@ class EmptyResultShapeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MappingShapeTest(unittest.TestCase):
+    """get_ipo_data answers with a dict keyed by subscription code, not with
+    detail rows. It was being sent through _normalize_detail_rows, which
+    iterates a dict by KEY and attribute-scrapes each code string -- so two real
+    IPOs arrived as [{}, {}]. Live check on 2026-08-28: the server returned
+    [{}] for type="STOCK" and [] for "BOND", i.e. QMT had handed over a
+    non-empty dict and the bridge had emptied it.
+    """
+
+    def test_the_row_normaliser_destroys_a_mapping(self):
+        from bigqmt_signal_trader.redis_rpc import _normalize_detail_rows
+
+        ipos = {"730001": {"issuePrice": 16.0, "maxPurchaseNum": 12000},
+                "001234": {"issuePrice": 8.5, "maxPurchaseNum": 5000}}
+        wrecked = _normalize_detail_rows(ipos)
+
+        self.assertEqual(wrecked, [{}, {}])   # this is why it needed its own path
+
+    def test_the_mapping_path_keeps_codes_and_values(self):
+        from bigqmt_signal_trader.redis_rpc import _normalize_mapping_value
+
+        ipos = {"730001": {"name": "x", "issuePrice": 16.0, "maxPurchaseNum": 12000}}
+        kept = dict((k, _normalize_mapping_value(v)) for k, v in ipos.items())
+
+        self.assertIn("730001", kept)
+        self.assertEqual(kept["730001"]["issuePrice"], 16.0)
+        self.assertEqual(kept["730001"]["maxPurchaseNum"], 12000)
+
+    def test_nested_values_survive(self):
+        from bigqmt_signal_trader.redis_rpc import _normalize_mapping_value
+
+        value = _normalize_mapping_value({"a": [1, 2, {"b": "c"}], "d": None})
+
+        self.assertEqual(value, {"a": [1, 2, {"b": "c"}], "d": None})
+
+    def test_a_wrong_shaped_response_is_reported_not_swallowed(self):
+        """Coercing [{}, {}] to {} reads as "no IPOs today" -- the exact silence
+        that let this survive."""
+        import logging
+
+        class _Client(object):
+            account_id = "acct"
+
+            def call(self, method, params=None, **kwargs):
+                return [{}, {}]
+
+        trader = type("T", (), {"client": _Client()})()
+        with self.assertLogs("bigqmt.xtquant_compat", level=logging.WARNING) as caught:
+            data = compat.BigQmtXtTrader.query_ipo_data(trader, None)
+
+        self.assertEqual(data, {})
+        self.assertIn("too old", "".join(caught.output))
+
+    def test_an_empty_response_logs_nothing(self):
+        class _Client(object):
+            account_id = "acct"
+
+            def call(self, method, params=None, **kwargs):
+                return []
+
+        trader = type("T", (), {"client": _Client()})()
+        self.assertEqual(compat.BigQmtXtTrader.query_ipo_data(trader, None), {})

@@ -703,6 +703,27 @@ class BigQmtRpcHandlers:
         except Exception:
             return []
 
+    def _call_qmt_mapping(self, func_name, *args, **kwargs):
+        """Same as _call_qmt_global, for the QMT globals that answer with a
+        mapping rather than a row list -- get_ipo_data, get_new_purchase_limit.
+
+        The row normaliser would iterate such a dict by key and throw the values
+        away, so these keep their shape and only have their values made
+        JSON-safe.
+        """
+        func = self.qmt_api.get(func_name)
+        if func is None:
+            return {}
+        try:
+            data = func(*args, **kwargs)
+        except Exception:
+            return {}
+        if isinstance(data, dict):
+            return dict((str(key), _normalize_mapping_value(value))
+                        for key, value in data.items())
+        # Some brokers hand back rows even here; normalise rather than drop.
+        return _normalize_detail_rows(data)
+
     def _configured_account_type(self):
         return str(
             getattr(self.order_gateway, "account_type", "CREDIT") or "CREDIT"
@@ -787,12 +808,20 @@ class BigQmtRpcHandlers:
         return self._call_qmt_global("get_last_order_id", self._request_account_id(params))
 
     def _handle_get_ipo_data(self, params):
-        # 8-28 修复: get_ipo_data(type) 期望 type 参数, 原错传 account_id -> [{}]
-        return self._call_qmt_global(
+        # get_ipo_data answers with a dict KEYED BY SUBSCRIPTION CODE, not with
+        # detail rows. Sending it through _normalize_detail_rows iterates the
+        # dict, i.e. its keys, and attribute-scrapes each code string -- so
+        # {"730001": {...}, "001234": {...}} came out as [{}, {}]: codes, issue
+        # prices and quantities all gone. #96 fixed the `type` argument but the
+        # response was still being destroyed here.
+        return self._call_qmt_mapping(
             "get_ipo_data", str(params.get("type") or params.get("stock_type") or ""))
 
     def _handle_get_new_purchase_limit(self, params):
-        return self._call_qmt_global("get_new_purchase_limit", self._request_account_id(params))
+        # Documented as returning a dict of 板块 -> 额度, so it has the same
+        # shape problem get_ipo_data had (6.10 in the API reference).
+        return self._call_qmt_mapping(
+            "get_new_purchase_limit", self._request_account_id(params))
 
     def _handle_get_history_trade_detail_data(self, params):
         account_id = self._request_account_id(params)
@@ -1175,6 +1204,18 @@ def _bool_value(value, default=False):
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _normalize_mapping_value(value):
+    """Make one mapping value JSON-safe without flattening its shape."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return dict((str(k), _normalize_mapping_value(v)) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return [_normalize_mapping_value(v) for v in value]
+    rows = _normalize_detail_rows([value])
+    return rows[0] if rows else {}
 
 
 def _normalize_detail_rows(rows):
