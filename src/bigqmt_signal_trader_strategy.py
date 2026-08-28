@@ -1048,8 +1048,15 @@ def _run_daily_ipo(ContextInfo):
             return
 
         print("[ipo] 今日可申购 %d 只新股:" % len(ipo))
+        skipped = 0
         for code, info in ipo.items():
             try:
+                # 只打沪深 (SH/SZ): 沪深打新是市值申购, 不冻结资金;
+                # 北交所 (BJ/920/8/4 开头) 需冻结资金, 排除.
+                if not _is_shsz_ipo_code(code):
+                    print("[ipo] %s 非沪深 (北交所/其他), 跳过" % code)
+                    skipped += 1
+                    continue
                 price = float(info.get("issuePrice") or 0)
                 max_num = int(info.get("maxPurchaseNum") or 0)
                 if price <= 0 or max_num <= 0:
@@ -1063,9 +1070,27 @@ def _run_daily_ipo(ContextInfo):
                     code, info.get("name", ""), max_num, price))
             except Exception as exc:
                 print("[ipo] %s 申购异常: %s" % (code, exc))
+        if skipped:
+            print("[ipo] 跳过北交所/非沪深 %d 只 (资金不冻结, 仅打沪深)" % skipped)
         print("[ipo] 今日打新完成")
     except Exception as exc:
         print("[ipo] 打新流程异常: %s" % exc)
+
+
+def _is_shsz_ipo_code(code):
+    """判断申购代码是否沪深 (SH/SZ). 北交所 920/8/4 开头或 .BJ 后缀 -> False."""
+    c = str(code or "")
+    up = c.upper()
+    if up.endswith(".BJ"):
+        return False
+    if up.endswith(".SH") or up.endswith(".SZ"):
+        return True
+    # 裸码: 920/8/4 开头北交所, 6/0/3 开头沪深
+    if up.startswith(("920", "8", "4")):
+        return False
+    if up[:1] in ("6", "0", "3"):
+        return True
+    return True  # 无法识别默认放行 (申购代码多为 7/0/3 开头)
 
 
 def adjust(ContextInfo, _source="timer"):
