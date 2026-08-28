@@ -834,6 +834,36 @@ class BigQmtRpcClient:
                 pass
 
 
+# IPO subscription codes are their own numbering, distinct from the listed
+# share's code. Classification is FAIL-CLOSED: an unrecognised code returns None
+# and the caller skips it. The version this replaced ended in `return True`
+# ("默认放行"), i.e. it guessed in favour of placing an order -- on a path whose
+# whole job was to keep BJ subscriptions, which freeze cash, out.
+_IPO_SH_PREFIXES = ("730", "732", "780", "787", "789", "707")
+_IPO_SZ_PREFIXES = ("00", "30")
+_IPO_BJ_PREFIXES = ("920", "889", "8", "4")
+
+
+def ipo_market_of(code):
+    """Return "SH" / "SZ" / "BJ", or None when the code is not recognised."""
+    text = str(code or "").strip().upper()
+    if not text:
+        return None
+    for suffix, market in ((".SH", "SH"), (".SZ", "SZ"), (".BJ", "BJ")):
+        if text.endswith(suffix):
+            return market
+    if not text.isdigit():
+        return None
+    # Order matters: BJ 920/889 would otherwise be caught by a looser rule.
+    if text.startswith(_IPO_BJ_PREFIXES):
+        return "BJ"
+    if text.startswith(_IPO_SH_PREFIXES):
+        return "SH"
+    if text.startswith(_IPO_SZ_PREFIXES):
+        return "SZ"
+    return None
+
+
 class BigQmtXtData:
     def __init__(self, client):
         self.client = client
@@ -2787,9 +2817,23 @@ class BigQmtXtTrader:
                 {"type": stock_type},
                 account_id=account_id,
             )
-            return data or []
+            # get_ipo_data answers with a dict keyed by subscription code.
+            if isinstance(data, dict):
+                return data
+            if data:
+                # Non-empty and not a dict: an older server is still routing
+                # this through the detail-row normaliser, which iterates the
+                # dict by key and discards every value -- real IPOs arrive as
+                # [{}, {}]. Coercing that to {} silently reports "no IPOs
+                # today", so say so instead of swallowing it.
+                log.warning(
+                    "query_ipo_data: server returned %s, not a mapping -- the "
+                    "QMT-side bridge is too old to preserve get_ipo_data's "
+                    "shape and the rows are empty. Update the server side.",
+                    type(data).__name__)
+            return {}
         except Exception:
-            return []
+            return {}
 
     def query_new_purchase_limit(self, account):
         """新股申购额度 (大 QMT get_new_purchase_limit).
@@ -2806,6 +2850,61 @@ class BigQmtXtTrader:
             return {}
         except Exception:
             return {}
+
+    def ipo_subscribe_all(self, account=None, stock_type="STOCK",
+                          markets=("SH", "SZ"), dry_run=False,
+                          strategy_name="ipo"):
+        """Subscribe to today's IPOs. Nothing here runs on a timer.
+
+        This is deliberately a call you make, not a behaviour the bridge takes
+        on: it places real orders, so it must be something the operator asked
+        for on that day. It also goes through order_stock, which means it obeys
+        rpc_allow_order_methods and inherits the gateway's passorder settings
+        (orderType 1101, prType 11 指定价, quickTrade 2 -- 2 being the value the
+        API reference requires for a non-bar context).
+
+        markets: exchanges to subscribe on. SH/SZ subscriptions are backed by
+            market value and freeze no cash; BJ freezes cash, so it is excluded
+            by default. A code whose market cannot be identified is SKIPPED,
+            never subscribed on a guess.
+        dry_run: return the plan without placing anything.
+
+        Returns one dict per candidate: stock_code, name, price, volume,
+        action ("subscribed" / "skipped" / "failed") and reason.
+        """
+        allowed = set(str(m).upper() for m in (markets or ()))
+        results = []
+        for code, info in (self.query_ipo_data(account, stock_type=stock_type) or {}).items():
+            info = info or {}
+            entry = {
+                "stock_code": code,
+                "name": str(info.get("name") or ""),
+                "price": _safe_float(info.get("issuePrice"), 0.0),
+                "volume": _safe_int(info.get("maxPurchaseNum"), 0),
+                "action": "skipped",
+                "reason": "",
+            }
+            market = ipo_market_of(code)
+            if market is None:
+                entry["reason"] = "market not identified"
+            elif market not in allowed:
+                entry["reason"] = "%s not in %s" % (market, sorted(allowed))
+            elif entry["price"] <= 0 or entry["volume"] <= 0:
+                entry["reason"] = "issuePrice/maxPurchaseNum missing or non-positive"
+            elif dry_run:
+                entry["action"] = "planned"
+            else:
+                try:
+                    entry["result"] = self.ipo_subscribe(
+                        account, code, entry["volume"], entry["price"],
+                        strategy_name=strategy_name,
+                        order_remark="ipo:%s" % code)
+                    entry["action"] = "subscribed"
+                except Exception as exc:
+                    entry["action"] = "failed"
+                    entry["reason"] = "%s: %s" % (exc.__class__.__name__, exc)
+            results.append(entry)
+        return results
 
     def ipo_subscribe(self, account, stock_code, volume, price, strategy_name="ipo",
                       order_remark="ipo_sub"):
