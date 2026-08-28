@@ -133,6 +133,9 @@ _last_full_tick_market_refresh_at = 0.0
 # Observed adjust cadence, so a mis-scheduled run_time (e.g. clamped to bar
 # cadence) is visible in the logs instead of silently costing latency.
 _adjust_tick_stats = {"last_ts": 0.0, "count": 0, "window_start": 0.0, "sum": 0.0, "min": 0.0, "max": 0.0}
+# 打新 (8-28): 记录当天已打新的日期 (YYYYMMDD), 幂等避免每日重复申购
+_ipo_done_date = None
+_IPO_SUBSCRIBE_HHMM = 940   # 每天 09:40 触发打新 (HHMM)
 
 
 def set_app_factory(factory):
@@ -989,6 +992,107 @@ def _adjust_phase(name, fn, *args):
             print("[adjust_phase] %s %.0fms" % (name, ms))
 
 
+def _maybe_run_daily_ipo(ContextInfo):
+    """每天 09:40 后触发一次打新 (adjust 每周期调用, _ipo_done_date 幂等)."""
+    from datetime import datetime as _dt
+    try:
+        now = _dt.now()
+        if now.strftime("%H%M") < "0940":
+            return
+        if now.strftime("%H%M") > "1130":
+            return  # 申购窗口过后不再触发
+        _run_daily_ipo(ContextInfo)
+    except Exception:
+        pass
+
+
+def _run_daily_ipo(ContextInfo):
+    """每日新股申购 (8-28, 子项目内置, 不依赖 RPC 查询链路).
+
+    在 QMT 主线程 (adjust) 中直接调用原生 get_ipo_data + passorder:
+      - get_ipo_data("STOCK") 拿当日可申购新股 (已验证在 QMT 端返回正确数据)
+      - 对每只 passorder(23, 1101, account, code, 11, 发行价, maxPurchaseNum)
+    passorder 由 QMT 运行时注入全局; account 用 _account_id.
+    幂等: _ipo_done_date 在函数最开头就标记当天, 无论成功失败当天只执行一次
+    (8-28 教训: 原实现末尾才设置, 中间异常导致 adjust 重复触发 -> 重复申购,
+     第二条被拒 "委托重复申购").
+    """
+    global _ipo_done_date
+    from datetime import datetime as _dt
+
+    today = _dt.now().strftime("%Y%m%d")
+    if _ipo_done_date == today:
+        return
+    _ipo_done_date = today   # 前置标记: 幂等 (当天只试一次)
+    try:
+        get_ipo_data = _resolve_runtime_name("get_ipo_data")
+        if get_ipo_data is None:
+            print("[ipo] get_ipo_data 未绑定 (QMT 未注入), 跳过打新")
+            return
+        passorder = _resolve_runtime_name("passorder")
+        if passorder is None:
+            print("[ipo] passorder 未绑定, 跳过打新")
+            return
+        account_id = _account_id or ""
+        if not account_id:
+            print("[ipo] account_id 未配置, 跳过打新")
+            return
+
+        try:
+            ipo = get_ipo_data("STOCK") or {}
+        except Exception as exc:
+            print("[ipo] get_ipo_data 调用异常: %s" % exc)
+            return
+        if not ipo:
+            print("[ipo] 今日无新股可申购")
+            return
+
+        print("[ipo] 今日可申购 %d 只新股:" % len(ipo))
+        skipped = 0
+        for code, info in ipo.items():
+            try:
+                # 只打沪深 (SH/SZ): 沪深打新是市值申购, 不冻结资金;
+                # 北交所 (BJ/920/8/4 开头) 需冻结资金, 排除.
+                if not _is_shsz_ipo_code(code):
+                    print("[ipo] %s 非沪深 (北交所/其他), 跳过" % code)
+                    skipped += 1
+                    continue
+                price = float(info.get("issuePrice") or 0)
+                max_num = int(info.get("maxPurchaseNum") or 0)
+                if price <= 0 or max_num <= 0:
+                    print("[ipo] %s 发行价/数量非法, 跳过" % code)
+                    continue
+                # passorder(opType=23 买入/申购, orderType=1101 普通, account, code,
+                #          prType=11 指定价, price=发行价, volume=max, strategy, quick, remark)
+                passorder(23, 1101, account_id, code, 11, price, max_num,
+                          "ipo", 1, "ipo:%s:%s" % (code, today), ContextInfo)
+                print("[ipo] %s(%s) 申购 %d 股 @ %s" % (
+                    code, info.get("name", ""), max_num, price))
+            except Exception as exc:
+                print("[ipo] %s 申购异常: %s" % (code, exc))
+        if skipped:
+            print("[ipo] 跳过北交所/非沪深 %d 只 (资金不冻结, 仅打沪深)" % skipped)
+        print("[ipo] 今日打新完成")
+    except Exception as exc:
+        print("[ipo] 打新流程异常: %s" % exc)
+
+
+def _is_shsz_ipo_code(code):
+    """判断申购代码是否沪深 (SH/SZ). 北交所 920/8/4 开头或 .BJ 后缀 -> False."""
+    c = str(code or "")
+    up = c.upper()
+    if up.endswith(".BJ"):
+        return False
+    if up.endswith(".SH") or up.endswith(".SZ"):
+        return True
+    # 裸码: 920/8/4 开头北交所, 6/0/3 开头沪深
+    if up.startswith(("920", "8", "4")):
+        return False
+    if up[:1] in ("6", "0", "3"):
+        return True
+    return True  # 无法识别默认放行 (申购代码多为 7/0/3 开头)
+
+
 def adjust(ContextInfo, _source="timer"):
     global _adjust_logged
     _record_adjust_tick()
@@ -1002,6 +1106,11 @@ def adjust(ContextInfo, _source="timer"):
             return None
     except Exception:
         pass
+    # 8-28: 每日打新 (QMT 主线程直接调 get_ipo_data + passorder)
+    try:
+        _maybe_run_daily_ipo(ContextInfo)
+    except Exception as exc:
+        print("[ipo] adjust 打新触发异常: %s" % exc)
     if not _adjust_logged:
         print("[bigqmt_signal_trader] adjust ok")
         _adjust_logged = True

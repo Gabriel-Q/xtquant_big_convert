@@ -2775,11 +2775,47 @@ class BigQmtXtTrader:
         except Exception:
             return []
 
-    def query_ipo_data(self, account=None):
-        return self._query_account_list(account, "query_appointment_info")
+    def query_ipo_data(self, account=None, stock_type=""):
+        """新股申购信息 (大 QMT get_ipo_data).
+        stock_type: "" 全部, "STOCK" 新股, "BOND" 新债.
+        8-28 修复: 直接调 get_ipo_data 带 type 参数 (原走 query_appointment_info
+        传 account_id 导致返回空)."""
+        account_id = _account_id(account, self.client.account_id)
+        try:
+            data = self.client.call(
+                "get_ipo_data",
+                {"type": stock_type},
+                account_id=account_id,
+            )
+            return data or []
+        except Exception:
+            return []
 
     def query_new_purchase_limit(self, account):
-        return {}
+        """新股申购额度 (大 QMT get_new_purchase_limit).
+        返回 {板块: 额度} 或 {} (失败/无权限)."""
+        account_id = _account_id(account, self.client.account_id)
+        try:
+            data = self.client.call(
+                "get_new_purchase_limit",
+                {"account_id": account_id},
+                account_id=account_id,
+            ) or {}
+            if isinstance(data, dict):
+                return data
+            return {}
+        except Exception:
+            return {}
+
+    def ipo_subscribe(self, account, stock_code, volume, price, strategy_name="ipo",
+                      order_remark="ipo_sub"):
+        """新股申购 (打新). 复用现有 order_stock RPC (passorder opType=23 指定价).
+        stock_code 应为 get_ipo_data 返回的申购代码 (带后缀), price=发行价.
+        返回 {order_sys_id} 或 {} (失败)."""
+        return self.order_stock_result(
+            account, stock_code, STOCK_BUY, int(volume),
+            FIX_PRICE, float(price), strategy_name, order_remark,
+        )
 
     # ------------------------------------------------------------------
     # async 变体：MiniQMT 的 *_async 方法返回 seq 后异步回调。
