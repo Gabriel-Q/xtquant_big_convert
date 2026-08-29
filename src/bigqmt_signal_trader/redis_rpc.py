@@ -586,7 +586,14 @@ class BigQmtRpcHandlers:
             codes = [code] if code else []
         if not codes:
             raise ValueError("codes or code is required")
-        return self.market_data.get_ticks(codes)
+        types = params.get("types")
+        if isinstance(types, str):
+            types = [types]
+        if not types:
+            # Pass one argument when nothing was asked for, so a market-data
+            # provider whose get_ticks takes only `codes` keeps working.
+            return self.market_data.get_ticks(codes)
+        return self.market_data.get_ticks(codes, types=list(types))
 
     def _handle_get_instrument(self, params):
         code = params.get("code")

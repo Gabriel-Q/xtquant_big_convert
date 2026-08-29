@@ -244,6 +244,56 @@ xtdata.unsubscribe_quote(seq)
 
 **验证**：实盘交易日验证 1/20/50/100 只标的，3s 推送节奏稳定，零丢失零乱序；多客户端共享/退订隔离/同客户端多 sub_id 全过；服务端重启恢复（42s 中断后验证两次）。详见 [docs/SUBSCRIBE_WHOLE_QUOTE_PUSH.md](docs/SUBSCRIBE_WHOLE_QUOTE_PUSH.md) 和 [docs/SUBSCRIBE_WHOLE_QUOTE_LIVE_VERIFICATION.md](docs/SUBSCRIBE_WHOLE_QUOTE_LIVE_VERIFICATION.md)。
 
+### 全市场快照的品种过滤（`types`）
+
+**市场令牌返回的是交易所挂牌的全部标的，股票只占一小部分。** 实测上交所 `"SH"` 共 **26744** 个标的，其中股票 **2315 只（8.7%）**，其余是债券（36%）、回购等。QMT 的耗时严格线性、约 **0.29ms/只**，所以全量要 7.4s，只取股票 0.9s。
+
+从 0.2.15 起 **默认只取股票**：
+
+```python
+xtdata.get_full_tick(["SH"])                      # 2315 只   1.08s   ← 新默认
+xtdata.get_full_tick(["SH"], types=["all"])       # 26744 只  7.39s   ← 旧行为
+xtdata.get_full_tick(["SH", "SZ"])                # 5216 只   1.66s
+xtdata.get_full_tick(["SH"], types=["stock","etf"])
+xtdata.get_full_tick(["600000.SH"])               # 显式代码不受影响
+```
+
+> **这是破坏性变更。** 如果你的代码依赖 `get_full_tick(["SH"])` 返回债券 / 回购 / ETF，请显式传 `types=["all"]`。收窄发生时会打印一次提示，便于发现：
+>
+> ```
+> [bigqmt_market] SH narrowed to 2315 stock; pass types=['all'] for every
+> instrument the exchange lists
+> ```
+
+| `types` | 板块 | 约数 |
+|---|---|---|
+| `stock`（默认） | 上证A股 / 深证A股 / 京市A股 | 2315 / 2901 / 339 |
+| `etf` | 沪深ETF | 1696 |
+| `fund` | 沪深基金 | 2249 |
+| `index` | 沪深指数 | 609 |
+| `convertible` | 沪深转债 | 320 |
+| `all` | 不收窄，返回交易所全部标的 | 26744（SH） |
+
+**关键在于请求时就收窄，而不是拿回来再过滤**——事后过滤仍要付 QMT 对每个多余标的的 0.29ms。板块清单由 FormulaServer 直连提供（实测 13ms）并按运行缓存，相对省下的时间可以忽略。
+
+**收窄失败时退回全量，不返回空**：板块查不到、类型不认识、该市场没有对应板块（如 `HK`），都保留市场令牌照旧请求。丢行情比慢更糟。
+
+**显式传超大代码列表会超时**：26744 个代码显式传入会打爆单次 RPC 超时，而市场令牌可以。要全量请用令牌 + `types=["all"]`。
+
+### `get_market_data_ex` 的 `field_list` 与速度
+
+不传 `field_list` 表示"要全部字段"，返回 11 列，**只能走 RPC**：
+
+```
+field_list=[]                      0.97s   11 列（含 preClose / suspendFlag 等）
+field_list=[open,high,low,close,volume,amount]
+                                   0.03s    6 列   ← FormulaServer 直连，约 30 倍
+```
+
+**这不是可以自动优化掉的差距。** FormulaServer 只供那 6 列，其余 4 列返回 `NaN`，而 RPC 有真实值（实测 `preClose` 9.07 / 7.82 / 11.59，直连全部为 `nan`）。把默认路由到直连会静默把真实价格换成 `NaN`，所以默认保持走 RPC。
+
+**只要 OHLCV 就显式写出来**，那 30 倍就到手了。首次不传 `field_list` 时会在 `bigqmt.log` 记一条说明。
+
 ### 可插拔传输层
 
 | 传输 | 同机 p50 | 跨机 | 适用场景 |
