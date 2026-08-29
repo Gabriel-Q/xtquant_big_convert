@@ -1343,9 +1343,14 @@ class BigQmtXtData:
         sub_id = session.subscribe_whole_quote(code_list, callback=callback)
         # The big-QMT whole-quote callback is incremental (changed symbols only),
         # so prime the callback once with a full get_full_tick snapshot.
+        #
+        # types=["all"] deliberately: the push side is ContextInfo's own
+        # subscribe_whole_quote, which is not narrowed, so a narrowed snapshot
+        # would hand the subscriber 2315 stocks and then start pushing all
+        # 26744 instruments. The primer has to cover what the push covers.
         if callback is not None:
             try:
-                callback(self.get_full_tick(code_list))
+                callback(self.get_full_tick(code_list, types=["all"]))
             except Exception:
                 pass
         return sub_id

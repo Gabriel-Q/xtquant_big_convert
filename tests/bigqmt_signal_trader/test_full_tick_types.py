@@ -251,3 +251,64 @@ class ProviderCompatibilityTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WholeQuotePrimeScopeTest(unittest.TestCase):
+    """The priming snapshot must cover what the push will cover.
+
+    subscribe_whole_quote's push side is ContextInfo's own subscription, which
+    this change does not narrow. If the primer narrowed, a subscriber to ["SH"]
+    would get 2315 stocks once and then 26744 instruments on every push.
+    """
+
+    def _xtdata(self):
+        from bigqmt_signal_trader import xtquant_compat as compat
+
+        class _Session(object):
+            def start(self):
+                pass
+
+            def subscribe_whole_quote(self, code_list, callback=None):
+                return 1
+
+            def has_subscription(self, sub_id):
+                return True
+
+            def unsubscribe_quote(self, sub_id):
+                return 0
+
+        class _Client(object):
+            account_id = "acct"
+            local_cache_config = {}
+            full_tick_cache_config = {}
+            transport_name = "redis"
+
+            def __init__(self):
+                self.params = []
+
+            def call(self, method, params=None, **kwargs):
+                self.params.append((method, dict(params or {})))
+                return {}
+
+        client = _Client()
+        data = compat.BigQmtXtData(client)
+        data._quote_session_factory = lambda: _Session()
+        return data, client
+
+    def test_the_primer_asks_for_everything(self):
+        data, client = self._xtdata()
+
+        data.subscribe_whole_quote(["SH"], callback=lambda d: None)
+
+        tick_calls = [p for m, p in client.params if m == "get_full_tick"]
+        self.assertTrue(tick_calls, "no priming snapshot was requested")
+        self.assertEqual(tick_calls[0].get("types"), ["all"])
+
+    def test_a_plain_get_full_tick_still_defaults_to_stocks(self):
+        """The escape hatch above must not leak into ordinary calls."""
+        data, client = self._xtdata()
+
+        data.get_full_tick(["SH"])
+
+        tick_calls = [p for m, p in client.params if m == "get_full_tick"]
+        self.assertNotIn("types", tick_calls[0])
