@@ -294,6 +294,59 @@ field_list=[open,high,low,close,volume,amount]
 
 **只要 OHLCV 就显式写出来**，那 30 倍就到手了。首次不传 `field_list` 时会在 `bigqmt.log` 记一条说明。
 
+### 版本检测与部署同步
+
+部署到 QMT 是**文件拷贝**，而 QMT 跨策略重跑保留 `sys.modules`。所以「忘了拷」和「拷了但没被加载」从外部看**一模一样**——这是本项目最容易浪费时间的一类问题：本地修好了，实盘却像没修。
+
+**启动时会打印实际加载的版本和目录：**
+
+```
+[bigqmt_shell] bigqmt_signal_trader 0.2.15 loaded from D:\...\python\bigqmt_signal_trader
+```
+
+**客户端可以直接问：**
+
+```python
+xtdata.get_deployment_info()
+# {'version': '0.2.15',
+#  'package_dir':    'D:\...\python\bigqmt_signal_trader',
+#  'qmt_python_dir': 'D:\...\python',
+#  'strategy_dir':   'D:\...\python',
+#  'python_version': '3.6.8'}
+```
+
+**版本不一致时，连接会告警：**
+
+```
+[WARNING] version mismatch: this client is 0.2.15, the QMT-side bridge is 0.2.9.
+A copy alone does not take effect -- QMT keeps modules across strategy re-runs,
+so the strategy must be restarted too. Set BIGQMT_AUTO_SYNC=1 (or call
+xt_trader.sync_deployment()) to push this client's package into the QMT python
+directory.
+```
+
+#### 同步
+
+```python
+xt_trader.sync_deployment(dry_run=True)   # 先看会动哪些文件
+xt_trader.sync_deployment()               # 真同步
+```
+
+目标目录来自 `get_deployment_info()`，**不必硬编码路径**。
+
+设环境变量 `BIGQMT_AUTO_SYNC=1` 后，连接时检测到版本不一致会自动同步。**默认关闭**——往实盘终端写文件不该是"连接"的副作用，源码树里若有半成品会直接进实盘。
+
+| 行为 | 说明 |
+|---|---|
+| **绝不写入配置文件** | `bigqmt_signal_trader_local_config.py` / `bigqmt_signal_trader_client_config.py` 存账号和凭据；对应的 `.example.py` 属文档，会更新 |
+| **不新增顶层文件** | 只刷新部署里已有的模块，加上策略入口（全新部署需要它）。否则 QMT 目录会变得没人说得清 |
+| **覆盖前备份** | 每个被覆盖的文件留 `.bak_<时间戳>` |
+| **原子写入** | 先写临时文件再替换，中断不会留下半个模块 |
+
+> **同步之后仍然必须手动重启策略。** QMT 跨重跑保留 `sys.modules`，拷贝本身不生效——每次同步结果都带 `restart_required` 并在日志里提示。
+
+**同步逻辑跑在客户端，不在 QMT 里。** 让交易进程盘中改写自己的代码，等于把源码树里的任何东西（包括改到一半的）直接送上实盘。
+
 ### 可插拔传输层
 
 | 传输 | 同机 p50 | 跨机 | 适用场景 |

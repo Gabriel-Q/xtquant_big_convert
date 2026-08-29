@@ -162,6 +162,26 @@ for _source_name, _source_value in _account_type_sources:
         break
 
 
+def _report_deployment():
+    """Print which build is actually running, before anything else happens.
+
+    A deploy is a file copy and QMT keeps modules across strategy re-runs, so
+    "the copy never happened" and "the copy happened but was not picked up"
+    look identical from the outside. This line tells them apart at a glance.
+    """
+    try:
+        # Submodule, not the root package: the QMT sandbox never execs
+        # bigqmt_signal_trader/__init__.py, so anything defined there is
+        # invisible in exactly the environment this line describes.
+        from bigqmt_signal_trader.version import deployment_report
+
+        version, directory = deployment_report()
+        print("[bigqmt_shell] bigqmt_signal_trader %s loaded from %s"
+              % (version, directory))
+    except Exception as exc:
+        print("[bigqmt_shell] version report unavailable: %s" % exc)
+
+
 def _report_account_type():
     """Say which account type won and where it came from."""
     print("[bigqmt_shell] account_type=%s (from %s)" % (ACCOUNT_TYPE, ACCOUNT_TYPE_SOURCE))
@@ -174,6 +194,7 @@ def _report_account_type():
               % ", ".join(conflicting))
 
 
+_report_deployment()
 _report_account_type()
 REDIS_HOST = BIGQMT_REDIS_CONFIG.get("host", REDIS_HOST)
 REDIS_PORT = int(BIGQMT_REDIS_CONFIG.get("port", REDIS_PORT))
