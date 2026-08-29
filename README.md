@@ -87,6 +87,7 @@ python -m bigqmt_signal_trader.init_config
 
 - `bigqmt_signal_trader.xtquant_compat`：把旧代码的 `xt_trader` / `xtdata` 调用转成 RPC，无需改业务代码。
 - 兼容 MiniQMT 方法名：`query_stock_asset` / `query_stock_positions` / `query_stock_orders` / `get_full_tick` / `order_stock` 等。
+- 顶层 `xtquant.xtdata.get_stock_type(stock)` 显式转发到 RPC；完整 QMT 的交易日 ContextInfo fallback 会把 `SH/SZ` 转成代表指数代码。委托快照增量暴露 `price_type` / `traded_price`，旧 QMT 不提供时分别保持 `None` / `0.0`。
 - **完整 xtconstant 枚举**（539 个常量，涵盖原生 MiniQMT 全部 90 个，值逐一比对无改动）：账号类型、委托类型（股票/期货/信用/期权）、报价类型、委托状态、账号状态、`ORDER_TYPE_SET`。
 
 ```python
@@ -719,10 +720,11 @@ cd D:\国金证券QMT交易端
 src/bigqmt_signal_trader/          （整个核心包，含 transports/）
 src/bigqmt_signal_trader_strategy.py
 src/bigqmt_signal_trader_redis_rpc_runtime.py
-src/BIGQMT_REDIS_DRYRUN.py         （★ QMT 编辑器入口，GBK 编码，在 QMT 里加载这个）
+src/BIGQMT_REDIS_DRYRUN.py         （★ Redis/MySQL/SHM 等既有 transport 的 QMT 编辑器入口）
+src/BIGQMT_ZMQ_DRYRUN.py           （★ 同机 ZMQ 专用入口，强制 ZMQ 并记录 bootstrap 异常）
 ```
 
-> **在 QMT 策略编辑器里只加载 `BIGQMT_REDIS_DRYRUN.py` 一个文件**。它会自动 import 上面其余文件。其余 `.py`（`bigqmt_signal_trader_*`）是它依赖的模块，不是直接运行的入口。
+> 同机 ZMQ 在 QMT“模型研究”中新建 Python 模型并加载 `BIGQMT_ZMQ_DRYRUN.py`；其它 transport 继续使用 `BIGQMT_REDIS_DRYRUN.py`。ZMQ 入口只复用原入口的加载逻辑，不会创建 Redis client。
 
 ### 第 2 步：创建 QMT 端私有配置
 
@@ -759,9 +761,9 @@ BIGQMT_REDIS_CONFIG = {
 
 > **重要**：切到 zmq 或 mysql 时，必须同时设 `"rpc_background_threads": True`（这两种传输用自己的后台线程，不走 QMT 回调 drain）。
 
-### 第 3 步：在 QMT 里运行策略（BIGQMT_REDIS_DRYRUN.py）
+### 第 3 步：在 QMT 里运行策略
 
-**入口文件是 `src/BIGQMT_REDIS_DRYRUN.py`**（GBK 编码，QMT 友好）。在 QMT 策略编辑器加载并运行它。
+同机 ZMQ 使用 `src/BIGQMT_ZMQ_DRYRUN.py`，其它 transport 使用 `src/BIGQMT_REDIS_DRYRUN.py`。两者都是 QMT 编辑器入口；ZMQ 入口会在正常 logger 初始化前失败时把 traceback 写入 `<QMT python>\logs\bigqmt-bootstrap-error.log`。部分券商 QMT 缺少标准 `importlib` 时，统一入口会注册仅包含 `import_module/reload` 的最小兼容模块。
 
 #### 这个文件做什么
 
@@ -807,7 +809,7 @@ def _known_qmt_python_dir():
 
 > **为什么是 GBK 编码？** QMT 的策略编辑器用本地代码页（中文 Windows 是 GBK）保存文件。文件头 `#coding:gbk` 声明编码，避免 QMT 保存时破坏 UTF-8 内容。源码本身是 ASCII（中文用 `chr()` 拼），所以实际不会乱码。
 
-> **为什么不直接用 `bigqmt_signal_trader_redis_rpc_runtime.py`？** 那个文件是纯逻辑入口，不包含 reload 和 QMT API 绑定。`BIGQMT_REDIS_DRYRUN.py` 是给 QMT 编辑器专用的外壳，处理了 QMT 进程不退出导致模块缓存、API 绑定等坑。在 QMT 里**只加载 `BIGQMT_REDIS_DRYRUN.py`**。
+> **为什么不直接用 `bigqmt_signal_trader_redis_rpc_runtime.py`？** 那个文件是纯逻辑入口，不包含 reload 和 QMT API 绑定。QMT 编辑器应加载与 transport 对应的外壳：同机 ZMQ 使用 `BIGQMT_ZMQ_DRYRUN.py`，其它 transport 使用 `BIGQMT_REDIS_DRYRUN.py`；不要直接加载 runtime 文件。
 
 ### 第 4 步：客户端调用
 
@@ -979,6 +981,7 @@ src/xtquant/                       可选 xtquant import shim
 src/bigqmt_signal_trader_strategy.py        策略入口（init/handlebar/adjust + 启动诊断）
 src/bigqmt_signal_trader_redis_rpc_runtime.py  Redis RPC runtime 入口
 src/BIGQMT_REDIS_DRYRUN.py                  QMT 编辑器加载入口（GBK）
+src/BIGQMT_ZMQ_DRYRUN.py                    同机 ZMQ QMT 编辑器入口（GBK）
 src/BIGQMT_ZMQ_BACKTEST.py                  独立 QMT 回测 ZMQ 入口（GBK）
 src/bigqmt_backtest/                        独立历史驱动、模拟撮合、ZMQ 协议与客户端
 tests/bigqmt_signal_trader/        单元测试（无 QMT 环境可跑）
@@ -1143,7 +1146,7 @@ python qmt-trader/scripts/qmt.py snapshot --table
 
 与「快速开始」的客户端一致：
 
-1. QMT 端 RPC 服务已启动（`BIGQMT_REDIS_DRYRUN.py` 运行中，输出面板/日志看到启动诊断 OK）；
+1. QMT 端 RPC 服务已启动（同机 ZMQ 运行 `BIGQMT_ZMQ_DRYRUN.py`，其它 transport 运行 `BIGQMT_REDIS_DRYRUN.py`，输出面板/日志看到启动诊断 OK）；
 2. 客户端配置就绪——环境变量（`BIGQMT_ACCOUNT_ID` / `BIGQMT_REDIS_HOST` / `BIGQMT_REDIS_PORT` / `BIGQMT_REDIS_DB` / `BIGQMT_REDIS_PASSWORD`）或配置文件；
 3. 先 `ping` 确认连通：redis 约 13ms / zmq 约 0.7ms 为正常，超时说明 transport 或配置不匹配。
 

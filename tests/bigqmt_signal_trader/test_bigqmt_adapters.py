@@ -328,6 +328,7 @@ class BigQmtAdaptersTest(unittest.TestCase):
                     m_nVolumeTraded=200,
                     m_nOrderStatus=50,
                     m_dLimitPrice=10.12,
+                    m_nOrderPriceType=44,
                     m_dTradedPrice=10.05,
                 )
             ]
@@ -349,7 +350,18 @@ class BigQmtAdaptersTest(unittest.TestCase):
         self.assertEqual(orders[0].action, "SELL")
         self.assertEqual(orders[0].traded_volume, 200)
         self.assertEqual(orders[0].price, 10.12)
+        self.assertEqual(orders[0].price_type, 44)
         self.assertEqual(orders[0].traded_price, 10.05)
+
+    def test_query_orders_optional_price_fields_keep_old_qmt_compatible(self):
+        """旧 QMT 不返回可选价格字段时保持 None。"""
+        def fake_query(*_args):
+            return [Obj(m_strOrderSysID="legacy-1", m_strRemark="legacy", m_strInstrumentID="000001", m_strExchangeID="SZ", m_nOffsetFlag=49, m_nVolumeTotalOriginal=200, m_nVolumeTraded=0, m_nOrderStatus=50)]
+
+        order = BigQmtOrderGateway(context_info=object(), get_trade_detail_data_func=fake_query).query_orders_strict("acct", "")[0]
+
+        self.assertIsNone(order.price_type)
+        self.assertEqual(order.traded_price, 0.0)
 
     def test_query_trades_without_strategy_omits_strategy_filter(self):
         calls = []
