@@ -804,6 +804,9 @@ class BigQmtRpcClient:
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "payload": payload or {},
         }
+        # 显式地址且未启用 Redis discovery 的 ZMQ 是纯 ZMQ 模式，不应隐式连接 Redis。
+        if self.transport_name == "zmq" and not bool(self.zmq_config.get("redis_discovery_enabled", False)):
+            return event
         raw = json.dumps(event, ensure_ascii=False, default=str)
         stream_key = stream_template.format(account_id=account_id)
         redis_client = self._redis()
@@ -818,6 +821,9 @@ class BigQmtRpcClient:
         return event
 
     def save_quote_subscription(self, seq, payload, active=True):
+        # MySQL、SHM 和混合 ZMQ 继续保留既有 Redis subscription metadata 行为。
+        if self.transport_name == "zmq" and not bool(self.zmq_config.get("redis_discovery_enabled", False)):
+            return
         account_id = str(self.account_id or "")
         key = "bigqmt:quote_subscriptions:%s" % account_id
         redis_client = self._redis()
@@ -1154,9 +1160,9 @@ class BigQmtXtData:
 
     def _get_market_data_ex_batch(self, params, timeout_seconds=None):
         """One RPC's worth of bars, healed and normalized. No caching."""
-        data = self._call("get_market_data_ex", timeout_seconds=timeout_seconds, **params)
+        data = self.client.call("get_market_data_ex", params, timeout_seconds=timeout_seconds)
         # Self-heal adjusted reads (all-zero bars -> server raw download + retry).
-        data = self._heal_adjusted("get_market_data_ex", params, data)
+        data = self._heal_adjusted("get_market_data_ex", params, data, timeout_seconds=timeout_seconds)
         # Normalize Big QMT's stime-indexed frame to MiniQMT shape (time-indexed).
         if isinstance(data, dict):
             data = _normalize_market_data_result(data, field_list=params.get("field_list"))
@@ -1360,7 +1366,7 @@ class BigQmtXtData:
         except Exception:
             pass
 
-    def _heal_adjusted(self, method, params, data, wait_seconds=2.0):
+    def _heal_adjusted(self, method, params, data, wait_seconds=2.0, timeout_seconds=None):
         """Self-heal adjusted reads: if the adjusted pull came back all-zero,
         trigger a server-side raw download, wait for async landing, retry once."""
         dividend_type = str(params.get("dividend_type") or "none").lower()
@@ -1378,6 +1384,8 @@ class BigQmtXtData:
             params.get("end_time", ""),
         )
         time.sleep(wait_seconds)
+        if timeout_seconds is not None:
+            return self.client.call(method, params, timeout_seconds=timeout_seconds)
         return self._call(method, **params)
 
     def _pull_and_cache(self, codes, period, start_time, end_time, count, dividend_type="none"):
@@ -1665,6 +1673,7 @@ class BigQmtXtData:
                     count=-1,
                     dividend_type=dividend_type,
                     fill_data=False,  # fill 会用全 0 占位行冒充数据，轮询判定必须关掉
+                    timeout_seconds=float(data_wait_seconds),
                 )
                 ready = 0
                 for code in batch:
@@ -3433,6 +3442,7 @@ class BigQmtXtTrader:
             order_time=_safe_int(item.get("order_time") or item.get("created_at_ts"), 0),
             # MiniQMT XtOrder.status_msg —— 废单时柜台给的原因 (issue #60)。
             status_msg=str(item.get("status_msg") or ""),
+            price_type=item.get("price_type"),
         )
 
     def _trade_from_dict(self, account_id, item):

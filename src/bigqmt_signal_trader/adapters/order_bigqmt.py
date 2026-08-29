@@ -233,6 +233,7 @@ class BigQmtOrderGateway:
                     remark=str(_attr(row, ("m_strRemark", "remark"), "") or ""),
                     order_time=_order_time_seconds(row),
                     status_msg=_status_message(row),
+                    price_type=_attr(row, ("m_nOrderPriceType", "price_type")),
                     traded_price=float(
                         _attr(row, ("m_dTradedPrice", "traded_price", "avg_traded_price"), 0.0) or 0.0
                     ),

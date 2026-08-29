@@ -50,6 +50,7 @@ Issues = "https://github.com/litaolemo/xtquant_big_convert/issues"
 package-dir = {"" = "src"}
 py-modules = [
     "BIGQMT_REDIS_DRYRUN",
+    "BIGQMT_ZMQ_DRYRUN",
     "BIGQMT_ZMQ_BACKTEST",
     "bigqmt_signal_trader_strategy",
     "bigqmt_signal_trader_redis_rpc_runtime",

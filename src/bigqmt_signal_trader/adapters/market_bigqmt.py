@@ -27,7 +27,6 @@ This module does not make trading decisions.
 """
 
 import importlib
-import importlib.util
 
 from ..code_utils import (
     EXCHANGE_TOKENS, FUTURES_MARKET_CODES, normalize_stock_code)
@@ -731,9 +730,10 @@ class BigQmtMarketDataProvider:
         # — note the FIRST argument differs (market vs stockcode). Every caller in
         # this codebase passes a market code, so the xtdata SDK is the correct path.
         def _via_context():
-            # ContextInfo's first arg is stockcode; pass market through anyway so
-            # backtest contexts still return something rather than crashing.
-            return self._call_context("get_trading_dates", market, start_time, end_time, count)
+            # ContextInfo 需要证券代码而不是市场代码；SH/SZ 使用代表指数，
+            # 调用方已经传入完整代码时保持原值。
+            context_stock = {"SH": "000001.SH", "SZ": "399001.SZ"}.get(str(market).upper(), market)
+            return self._call_context("get_trading_dates", context_stock, start_time, end_time, count)
 
         return self._native_or_context(
             "get_trading_dates", _via_context, market, start_time, end_time, count
