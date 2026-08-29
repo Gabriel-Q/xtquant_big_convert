@@ -897,6 +897,90 @@ def _notice_field_list_cost(field_list):
         pass
 
 
+# Bar subscriptions poll, because there is no server-side push for K-lines: the
+# bridge only exposes ContextInfo.subscribe_whole_quote, which carries ticks.
+# Interval is a floor on how stale a bar can be, not a promise of freshness.
+DEFAULT_BAR_POLL_INTERVAL_SECONDS = 3.0
+
+
+class _BarPoller(object):
+    """Emit a K-line callback when the newest bar changes.
+
+    MiniQMT's subscribe_quote pushes each bar update. We approximate it by
+    re-reading the last bars and firing only when the newest one differs, so a
+    caller written against MiniQMT keeps working. Every callback is wrapped:
+    a raising subscriber must not kill the polling thread and silently end the
+    subscription.
+    """
+
+    def __init__(self, fetch, callback, interval_seconds, on_error=None,
+                 on_no_data=None):
+        self._fetch = fetch
+        self._callback = callback
+        self._interval = max(0.2, float(interval_seconds))
+        self._on_error = on_error
+        self._on_no_data = on_no_data
+        self._stop = threading.Event()
+        self._last_signature = None
+        self._reported_no_data = False
+        self._thread = threading.Thread(target=self._loop)
+        self._thread.daemon = True
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+
+    @staticmethod
+    def _signature(data):
+        """Identify the newest bar cheaply, without assuming a container type."""
+        try:
+            for value in (data or {}).values():
+                if value is None:
+                    continue
+                if hasattr(value, "empty"):          # pandas DataFrame
+                    if getattr(value, "empty", True):
+                        continue
+                    return str(value.index[-1]), int(len(value))
+                if isinstance(value, (list, tuple)) and value:
+                    return repr(value[-1]), len(value)
+                if isinstance(value, dict) and value:
+                    key = sorted(value.keys())[-1]
+                    return repr(key), len(value)
+        except Exception:
+            return None
+        return None
+
+    def _loop(self):
+        while not self._stop.is_set():
+            try:
+                data = self._fetch()
+                signature = self._signature(data)
+                if signature is None:
+                    # No bars for this period. The subscription is live and will
+                    # start firing if data appears, but until then the caller
+                    # gets nothing -- which is indistinguishable from a broken
+                    # subscription unless we say so. Reported once, not per poll.
+                    if not self._reported_no_data:
+                        self._reported_no_data = True
+                        if self._on_no_data is not None:
+                            self._on_no_data()
+                elif signature != self._last_signature:
+                    self._reported_no_data = False
+                    self._last_signature = signature
+                    if self._callback is not None:
+                        self._callback(data)
+            except Exception as exc:
+                if self._on_error is not None:
+                    try:
+                        self._on_error(exc)
+                    except Exception:
+                        pass
+            self._stop.wait(self._interval)
+
+
 class BigQmtXtData:
     def __init__(self, client):
         self.client = client
@@ -904,6 +988,8 @@ class BigQmtXtData:
         self._cache_obj = None
         self._quote_session = None          # lazily built WholeQuoteClientSession
         self._quote_session_factory = None  # test hook: returns a session-like object
+        self._bar_pollers = {}              # seq -> _BarPoller, for K-line periods
+        self._bar_poller_lock = threading.Lock()
 
     def _next_seq(self):
         self._subscribe_seq += 1
@@ -1261,34 +1347,82 @@ class BigQmtXtData:
         return out
 
     def subscribe_quote(self, stock_code, period="1d", start_time="", end_time="", count=0, callback=None):
-        seq = self._next_seq()
+        """Subscribe to one instrument, MiniQMT-style: the callback keeps firing.
+
+        This used to invoke the callback exactly once and never again -- a
+        one-shot fetch wearing a subscription's name, which is worse than not
+        having it, because it looks like it works (issue #95).
+
+        Ticks ride the whole-quote push channel; a single code is just a
+        one-element code list. K-lines have no server-side push -- the bridge
+        only exposes ContextInfo.subscribe_whole_quote, which carries ticks --
+        so they are polled and emitted when the newest bar changes.
+        """
         payload = {
-            "seq": seq,
             "stock_code": stock_code,
             "period": period,
             "start_time": start_time,
             "end_time": end_time,
             "count": count,
         }
-        self.client.save_quote_subscription(seq, payload, active=True)
-        self.client.publish_event("subscribe_quote", payload)
-        if callback is not None:
-            try:
-                if str(period).lower() in ("tick", "full_tick"):
+
+        if str(period).lower() in ("tick", "full_tick"):
+            session = self._whole_quote_session()
+            session.start()
+            seq = session.subscribe_whole_quote([stock_code], callback=callback)
+            # The whole-quote callback is incremental; prime it with a snapshot
+            # so a subscriber is not left with nothing until the first change.
+            if callback is not None:
+                try:
                     callback(self.get_full_tick([stock_code]))
-                else:
-                    callback(
-                        self.get_market_data_ex(
-                            stock_list=[stock_code],
-                            period=period,
-                            start_time=start_time,
-                            end_time=end_time,
-                            count=count,
-                        )
-                    )
-            except Exception:
-                pass
+                except Exception:
+                    pass
+            self._record_subscription(seq, payload)
+            return seq
+
+        seq = self._next_seq()
+
+        def fetch():
+            return self.get_market_data_ex(
+                stock_list=[stock_code], period=period,
+                start_time=start_time, end_time=end_time, count=count or 1)
+
+        poller = _BarPoller(
+            fetch, callback, self._bar_poll_interval_seconds(),
+            on_error=lambda exc: log.debug(
+                "subscribe_quote poll failed code=%s period=%s: %s",
+                stock_code, period, exc),
+            on_no_data=lambda: log.warning(
+                "subscribe_quote: no %s bars for %s -- the subscription is live "
+                "but stays silent until this terminal has data for that period. "
+                "Check the period is downloaded (get_market_data_ex returns an "
+                "empty frame for it).", period, stock_code))
+        with self._bar_poller_lock:
+            self._bar_pollers[seq] = poller
+        poller.start()
+        self._record_subscription(seq, payload)
         return seq
+
+    def _bar_poll_interval_seconds(self):
+        config = dict(getattr(self.client, "full_tick_cache_config", {}) or {})
+        value = (config.get("bar_poll_interval_seconds")
+                 or os.environ.get("BIGQMT_BAR_POLL_INTERVAL_SECONDS"))
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return DEFAULT_BAR_POLL_INTERVAL_SECONDS
+
+    def _record_subscription(self, seq, payload, active=True):
+        """Bookkeeping only -- nothing on the server consumes it, and it needs a
+        Redis client, which a zmq deployment does not have. Never let it break
+        an otherwise working subscription."""
+        try:
+            self.client.save_quote_subscription(seq, dict(payload, seq=seq), active=active)
+            self.client.publish_event(
+                "subscribe_quote" if active else "unsubscribe_quote",
+                dict(payload, seq=seq))
+        except Exception:
+            pass
 
     def subscribe_quote2(self, stock_code, period="1d", start_time="", end_time="", count=0, dividend_type=None, callback=None):
         return self.subscribe_quote(
@@ -1356,16 +1490,35 @@ class BigQmtXtData:
         return sub_id
 
     def unsubscribe_quote(self, seq):
-        # subscribe_whole_quote handles are owned by the push session; single-stock
-        # subscribe_quote seqs still retire through the legacy redis-event path.
+        # Three kinds of handle now: whole-quote / tick subscriptions owned by
+        # the push session, K-line pollers owned here, and legacy seqs that only
+        # ever existed as redis bookkeeping.
+        with self._bar_poller_lock:
+            poller = self._bar_pollers.pop(seq, None)
+        if poller is not None:
+            poller.stop()
+            self._record_subscription(seq, {}, active=False)
+            return 0
+
         session = self._quote_session
         if session is not None and session.has_subscription(seq):
             session.unsubscribe_quote(seq)
-        else:
-            payload = {"seq": seq}
-            self.client.save_quote_subscription(seq, payload, active=False)
-            self.client.publish_event("unsubscribe_quote", payload)
+            self._record_subscription(seq, {}, active=False)
+            return 0
+
+        self._record_subscription(seq, {}, active=False)
         return 0
+
+    def stop_all_subscriptions(self):
+        """Stop every K-line poller this object owns. Daemon threads die with
+        the process anyway; this is for tests and for callers that recycle a
+        client without exiting."""
+        with self._bar_poller_lock:
+            pollers = list(self._bar_pollers.values())
+            self._bar_pollers.clear()
+        for poller in pollers:
+            poller.stop()
+        return len(pollers)
 
     def run(self):
         while True:

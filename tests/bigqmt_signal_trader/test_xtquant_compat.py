@@ -493,11 +493,39 @@ class XtquantCompatTest(unittest.TestCase):
     def test_quote_subscribe_and_unsubscribe_write_redis_events(self):
         xtdata = self._xtdata()
 
+        # Tick subscriptions ride the whole-quote push session now (#95), so
+        # stand one in; the bookkeeping this test covers is unchanged.
+        class _Session(object):
+            def __init__(self):
+                self.active = set()
+                self.subscribed = []
+
+            def start(self):
+                pass
+
+            def subscribe_whole_quote(self, code_list, callback=None):
+                self.subscribed.append(list(code_list))
+                sub_id = 900 + len(self.subscribed)
+                self.active.add(sub_id)
+                return sub_id
+
+            def unsubscribe_quote(self, sub_id):
+                self.active.discard(sub_id)
+                return 0
+
+            def has_subscription(self, sub_id):
+                return sub_id in self.active
+
+        session = _Session()
+        xtdata._quote_session_factory = lambda: session
+
         seq = xtdata.subscribe_quote("600000.SH", period="tick")
         result = xtdata.unsubscribe_quote(seq)
 
         key = "bigqmt:quote_subscriptions:acct"
         self.assertEqual(result, 0)
+        self.assertEqual(session.subscribed, [["600000.SH"]])
+        self.assertNotIn(seq, session.active)
         self.assertNotIn(str(seq), xtdata.client.redis.hashes.get(key, {}))
         self.assertIn((key, str(seq)), xtdata.client.redis.deleted)
         self.assertEqual(xtdata.client.redis.events[0][0], "subscribe_quote")
