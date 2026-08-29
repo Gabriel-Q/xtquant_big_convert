@@ -2,6 +2,73 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
+## [0.2.16] - 2026-08-29
+
+纯新增，无破坏性变更。
+
+### 新增
+
+- **部署版本检测**：部署到 QMT 是文件拷贝，而 QMT 跨策略重跑保留 `sys.modules`——所以「忘了拷」和「拷了但没被加载」**从外部看完全一样**，此前只能靠比对文件字节和找行为变化来判断。
+
+  启动日志现在会说明实际加载的是哪个构建：
+
+  ```
+  [bigqmt_shell] bigqmt_signal_trader 0.2.16 loaded from D:\...\python\bigqmt_signal_trader
+  ```
+
+  同一信息开放为 RPC：
+
+  ```python
+  xtdata.get_deployment_info()
+  # {'version': '0.2.16', 'package_dir': ..., 'qmt_python_dir': ...,
+  #  'strategy_dir': ..., 'python_version': '3.6.8'}
+  ```
+
+  `ping` 响应也带上了 `version`，客户端连接时若与自身版本不一致会**告警一次**，并说明拷贝之后仍需重启策略。
+
+- **部署同步 `sync_deployment()`**：把客户端的包推到 QMT 的 python 目录，目标目录取自 `get_deployment_info()`，**不必硬编码路径**。
+
+  ```python
+  xt_trader.sync_deployment(dry_run=True)   # 先看会动哪些文件
+  xt_trader.sync_deployment()               # 真同步
+  ```
+
+  设 `BIGQMT_AUTO_SYNC=1` 后，连接时检测到版本不一致会自动同步。**默认关闭**——往实盘终端写文件不该是「连接」的副作用，源码树里若有半成品会直接进实盘。
+
+  | 行为 | 说明 |
+  |---|---|
+  | **绝不写入配置文件** | `bigqmt_signal_trader_local_config.py` / `bigqmt_signal_trader_client_config.py` 存账号与凭据；对应 `.example.py` 属文档，会更新 |
+  | **不新增顶层文件** | 只刷新部署已有的模块，加上策略入口（全新部署需要） |
+  | **覆盖前备份** | 留 `.bak_<时间戳>` |
+  | **原子写入** | 先写临时文件再替换，中断不会留下半个模块 |
+
+  **同步逻辑跑在客户端，不在 QMT 内。** 让交易进程盘中改写自己的代码，等于把源码树里的任何东西——包括改到一半的——直接送上实盘。每次结果都带 `restart_required`：拷贝本身不生效，必须重启策略。
+
+### 修复
+
+- **`__version__` 卡在 `0.2.0` 已十五个版本**，因而无法回答上述任何问题。现跟随 `pyproject.toml`，由测试钉住，并要求 `CHANGELOG` 中存在对应条目。
+
+- **版本标记移出 `__init__.py`**：QMT 沙箱的加载器**从不执行根包**——它建一个空模块直接返回，因为根包的 eager exports 会撞 QMT 的导入白名单：
+
+  ```python
+  # QMT native allowlist rejects the root package eager exports.
+  if name == "bigqmt_signal_trader":
+      return module
+  ```
+
+  所以 `__init__.py` 里定义的东西**在 QMT 里不存在**——在所有测试环境都正常，唯独在它唯一需要生效的地方是隐形的。第一版正是放在那里，实盘返回 `AttributeError: module 'bigqmt_signal_trader' has no attribute 'deployment_report'`。现位于 `version.py` 子模块，测试钉住放置位置与导入写法。
+
+### 实盘验证
+
+部署 + 重启后：启动版本行出现；`get_deployment_info` 返回的版本与本地包一致；同步真跑一次——更新 3 个文件、跳过 51 个相同文件、**两个配置文件字节未变**、二次运行报告无操作。
+
+### 已知限制
+
+- **同步之后仍需手动重启策略**，无法从外部触发（`qmt_launcher` 的 `restart` 路径从未在真实环境执行过）。
+- 其余同 0.2.15：本终端无期货行情权限、推送通道不可达的部署未验证、PR #88（信用委托类型）未合入、`can_close_vol` 哨兵值（#84）等。
+
+---
+
 ## [0.2.15] - 2026-08-29
 
 ### 破坏性变更
