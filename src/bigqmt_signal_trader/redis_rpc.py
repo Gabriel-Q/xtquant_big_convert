@@ -31,6 +31,7 @@ RPC_REVISION = "20260715-execution-snapshot-v1"
 
 READ_METHODS = {
     "ping",
+    "get_deployment_info",
     "get_ticks",
     "get_instrument",
     "get_instrument_type",
@@ -477,6 +478,53 @@ class BigQmtRpcHandlers:
             "rpc_revision": RPC_REVISION,
             "server_time": _dt.datetime.now(),
         }
+
+    def _handle_get_deployment_info(self, params):
+        """Where this bridge is running from, and which build it is.
+
+        Deploying into QMT is a file copy, and QMT keeps modules in sys.modules
+        across strategy re-runs -- so "the copy never happened" and "the copy
+        landed but was not picked up" are indistinguishable from the client
+        side. This lets the client ask instead of guessing, and gives a sync
+        tool somewhere to copy to without the trading process rewriting its own
+        code.
+        """
+        import os
+        import sys as _sys
+
+        info = {
+            "version": "",
+            "package_dir": "",
+            "qmt_python_dir": "",
+            "strategy_dir": "",
+            "python_version": "",
+            "rpc_revision": RPC_REVISION,
+        }
+        try:
+            info["python_version"] = ".".join(
+                str(part) for part in _sys.version_info[:3])
+        except Exception:
+            pass
+        try:
+            # Submodule: the QMT sandbox never execs the root package.
+            from bigqmt_signal_trader.version import deployment_report
+
+            version, package_dir = deployment_report()
+            info["version"] = version
+            info["package_dir"] = package_dir
+            # The QMT python directory is the package's parent: that is where a
+            # sync tool writes, and where the top-level modules live.
+            info["qmt_python_dir"] = os.path.dirname(package_dir)
+        except Exception as exc:
+            info["error"] = "%s: %s" % (exc.__class__.__name__, exc)
+        try:
+            strategy = _sys.modules.get("bigqmt_signal_trader_strategy")
+            path = getattr(strategy, "__file__", "")
+            if path:
+                info["strategy_dir"] = os.path.dirname(os.path.abspath(path))
+        except Exception:
+            pass
+        return info
 
     # ------------------------------------------------------------------
     # 全推行情订阅控制（引用计数共享 ContextInfo.subscribe_whole_quote）。

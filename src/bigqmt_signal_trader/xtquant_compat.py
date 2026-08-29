@@ -1055,6 +1055,16 @@ class BigQmtXtData:
             rpc_timeout = 30 if upper_codes & {"SH", "SZ", "BJ", "HK"} else None
         return self.client.call("get_full_tick", _full_tick_params(codes, types), timeout_seconds=rpc_timeout) or {}
 
+    def get_deployment_info(self):
+        """Where the QMT-side bridge is running from, and which build it is.
+
+        Returns version / package_dir / qmt_python_dir / strategy_dir /
+        python_version. Use it to check a deploy landed before hunting for a
+        fix that was never actually there -- QMT keeps modules across strategy
+        re-runs, so a forgotten copy and an un-reloaded one look the same.
+        """
+        return self.client.call("get_deployment_info", {}) or {}
+
     def get_instrument_detail(self, stock_code):
         return self.client.call("get_instrument_detail", {"code": stock_code}) or {}
 
