@@ -2,6 +2,21 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
+## [0.3.0] - 2026-08-29
+
+### 新增
+
+- **纯 ZMQ 编辑器入口 `BIGQMT_ZMQ_DRYRUN.py`**（PR #108，@amigobot）：无 redis 部署（券商白名单沙箱）专用入口，强制 ZMQ + 后台线程，自动关闭 redis 依赖功能（download_jobs/exec_events/full_tick_cache）；bootstrap 失败写入 `logs/bigqmt-bootstrap-error.log`。能力边界（无执行回报推送）已在 README 注明。
+- **精简 QMT Python 兼容 fallback**：部分券商 python36.zip 裁掉 `importlib` / `logging`——REDIS_DRYRUN 注册最小 importlib 替代模块，logging_setup 降级为手写文件+stdout logger。
+- **`OrderSnapshot.price_type`**：委托快照透出报价类型（m_nOrderPriceType），并补 `traded_price`；shim 新增 `xtdata.get_stock_type` 转发。
+
+### 修复
+
+- **纯 ZMQ 模式隐式连 Redis**（PR #108）：`publish_event`/`save_quote_subscription` 在无 redis discovery 的纯 ZMQ 下直接跳过，不再隐式建 redis 连接。
+- **日线缓存日期窗口全滤光**（PR #108）：缓存为 8 位日期轴而调用方传 14 位 start_time 时字符串比较清空全部数据，现在按缓存轴精度对齐下限。
+- **timeout_seconds 被吞**（PR #108）：`get_market_data_ex` 批处理与复权自愈重试路径上超时参数被丢弃，现全程透传。
+- **交易日 ContextInfo fallback 用错首参**（PR #108）：SH/SZ 市场码被当证券代码传入，改为映射代表指数（000001.SH/399001.SZ）。
+
 ## [0.2.16] - 2026-08-29
 
 纯新增，无破坏性变更。
