@@ -6,23 +6,39 @@ import re
 _DIGIT_CODE_RE = re.compile(r"^\d{6}$")
 
 
+# QMT ContextInfo uses market-specific suffixes for all instrument types.
+_QMT_SUFFIXES = (
+    ".SH", ".SZ", ".BJ", ".HK",            # Stock markets
+    ".HGT", ".SGT",                        # 港股通（沪/深）
+    ".SHO", ".SZO",                        # Options markets (8-digit codes)
+    ".SF", ".DF", ".IF", ".ZF", ".INE", ".GF",    # Futures markets
+)
+# Futures symbols are case-sensitive: each exchange has its own convention, and
+# the two are not interchangeable -- "rb2401.SF" (SHFE, lower) is a different
+# string to QMT than "RB2401.SF", while CZCE writes "AP401.ZF" upper. Uppercasing
+# a lowercase futures symbol therefore produces a code QMT does not recognise,
+# which surfaces as an empty quote rather than an error (issue #95).
+#
+# #68 fixed this for POSITION rows by bypassing this function; every other path
+# -- orders, quotes, the full-tick cache, the risk guard -- still came through
+# here and got uppercased.
+_CASE_SENSITIVE_SUFFIXES = frozenset({".SF", ".DF", ".IF", ".ZF", ".INE", ".GF"})
+
+
 def normalize_stock_code(code):
-    text = str(code or "").strip().upper()
-    if not text:
+    raw = str(code or "").strip()
+    if not raw:
         return ""
-    # QMT ContextInfo uses market-specific suffixes for all instrument types.
+    text = raw.upper()
     # If the code already has a recognized suffix, pass it through unchanged —
     # these are native ContextInfo codes that need no normalization.
-    _QMT_SUFFIXES = (
-        ".SH", ".SZ", ".BJ", ".HK",           # Stock markets
-        ".HGT", ".SGT",                        # 港股通（沪/深）
-        ".SHO", ".SZO",                        # Options markets (8-digit codes)
-        ".SF", ".DF", ".IF", ".ZF", ".INE", ".GF",    # Futures markets
-    )
     for suffix in _QMT_SUFFIXES:
         if text.endswith(suffix):
             prefix = text[:-len(suffix)]
             if prefix and (prefix.isdigit() or prefix[0].isalpha()):
+                if suffix in _CASE_SENSITIVE_SUFFIXES:
+                    # Normalise the suffix, keep the caller's symbol verbatim.
+                    return raw[:-len(suffix)] + suffix
                 return text
     # Original logic for 6-digit stock codes
     if text.startswith("SH") and _DIGIT_CODE_RE.match(text[2:]):
