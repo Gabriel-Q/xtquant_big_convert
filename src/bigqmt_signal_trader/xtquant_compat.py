@@ -981,6 +981,48 @@ class _BarPoller(object):
             self._stop.wait(self._interval)
 
 
+_VERSION_WARNED = {"shown": False}
+
+
+def warn_on_version_mismatch(ping_response):
+    """Warn once when the QMT-side bridge is not the build this client is.
+
+    Deploying into QMT is a file copy and QMT keeps modules across strategy
+    re-runs, so a stale server behaves like a fix that "did not work". Say so on
+    connect instead of leaving it to be discovered by debugging.
+
+    Silent when the versions agree, when the server is too old to report one, or
+    when it has already been said. Never raises: this is on the connect path.
+    """
+    if _VERSION_WARNED["shown"]:
+        return None
+    try:
+        server = str((ping_response or {}).get("version") or "")
+        if not server:
+            return None      # server predates version reporting; nothing to compare
+        from .version import __version__ as local
+
+        if server == local:
+            return None
+        _VERSION_WARNED["shown"] = True
+        log.warning(
+            "version mismatch: this client is %s, the QMT-side bridge is %s. "
+            "A copy alone does not take effect -- QMT keeps modules across "
+            "strategy re-runs, so the strategy must be restarted too. Set "
+            "BIGQMT_AUTO_SYNC=1 (or call xt_trader.sync_deployment()) to push "
+            "this client's package into the QMT python directory.",
+            local, server)
+        return (local, server)
+    except Exception:
+        return None
+
+
+def auto_sync_enabled():
+    """Writing into a live trading terminal is opt-in, not a side effect of
+    connecting."""
+    return _bool_value(os.environ.get("BIGQMT_AUTO_SYNC"), False)
+
+
 class BigQmtXtData:
     def __init__(self, client):
         self.client = client
@@ -2069,9 +2111,47 @@ class BigQmtXtTrader:
 
     def connect(self):
         if self.client.account_id:
-            self.client.call("ping")
+            mismatch = warn_on_version_mismatch(self.client.call("ping"))
+            if mismatch and auto_sync_enabled():
+                self.sync_deployment()
         self._fire_account_status()
         return 0
+
+    def sync_deployment(self, dry_run=False):
+        """Push this client's package into the QMT python directory.
+
+        The copy runs here, not inside QMT: a trading process rewriting its own
+        code mid-session would put whatever is in the source tree, half-finished
+        edits included, straight onto the live terminal.
+
+        Config files are never written. The strategy still has to be restarted
+        afterwards -- QMT keeps modules in sys.modules across re-runs, so a copy
+        on its own changes nothing.
+        """
+        from .sync import sync_deployment as _sync
+
+        info = self.get_deployment_info()
+        target = info.get("qmt_python_dir") or ""
+        if not target:
+            log.warning("sync_deployment: the bridge did not report a "
+                        "qmt_python_dir (server too old?); nothing copied")
+            return {"updated": [], "error": "no qmt_python_dir reported"}
+
+        result = _sync(target, dry_run=dry_run)
+        if result.get("error"):
+            log.warning("sync_deployment: %s", result["error"])
+        elif result["updated"]:
+            log.warning(
+                "sync_deployment: %d file(s) %s in %s. RESTART THE STRATEGY -- "
+                "QMT keeps modules across re-runs, so this has no effect until "
+                "you do. Config files untouched: %s",
+                len(result["updated"]),
+                "would be updated" if dry_run else "updated",
+                target, ", ".join(result["skipped_config"]) or "none present")
+        else:
+            log.info("sync_deployment: already up to date (%d files identical)",
+                     result["identical"])
+        return result
 
     def subscribe(self, account):
         if not self.client.account_id:

@@ -476,6 +476,7 @@ class BigQmtRpcHandlers:
             "account_id": self.account_id,
             "allow_order_methods": bool(self.allow_order_methods),
             "rpc_revision": RPC_REVISION,
+            "version": _deployed_version(),
             "server_time": _dt.datetime.now(),
         }
 
@@ -1259,6 +1260,16 @@ def _bool_value(value, default=False):
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _deployed_version():
+    """Version of the bridge actually running here, or "" if unknown."""
+    try:
+        from bigqmt_signal_trader.version import __version__
+
+        return __version__
+    except Exception:
+        return ""
 
 
 def _normalize_mapping_value(value):
