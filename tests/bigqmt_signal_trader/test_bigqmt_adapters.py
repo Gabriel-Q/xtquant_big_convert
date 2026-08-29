@@ -135,9 +135,10 @@ class BigQmtAdaptersTest(unittest.TestCase):
 
         ticks = provider.get_ticks(["rb2708.SF", "a2609.DF"])
 
-        # QMT is still asked in upper case...
-        self.assertEqual(context.tick_codes, [["RB2708.SF", "A2609.DF"]])
-        # ...but the caller gets its own spelling back.
+        # QMT is asked in the caller's own spelling now. Upper-casing here was
+        # what kept the #95 fix from reaching get_full_tick: "rb2610.SF" arrived
+        # as "RB2610.SF", which QMT does not recognise.
+        self.assertEqual(context.tick_codes, [["rb2708.SF", "a2609.DF"]])
         self.assertEqual(sorted(ticks), ["a2609.DF", "rb2708.SF"])
 
     def test_get_ticks_still_completes_the_suffix(self):
@@ -157,6 +158,61 @@ class BigQmtAdaptersTest(unittest.TestCase):
         ticks = BigQmtMarketDataProvider(ExtraContext()).get_ticks(["rb2708.SF"])
 
         self.assertEqual(sorted(ticks), ["SURPRISE.SF", "rb2708.SF"])
+
+    def test_get_ticks_maps_back_whichever_case_qmt_answers_in(self):
+        """We send the caller's spelling now, but whether QMT echoes that or
+        canonicalises could not be observed here -- this terminal has no futures
+        data. The mapping must hold either way, or #58 comes back."""
+        class Echoes:
+            def get_full_tick(self, codes):
+                return dict((c, {"lastPrice": 1.0}) for c in codes)
+
+        class Canonicalises:
+            def get_full_tick(self, codes):
+                return dict((c.upper(), {"lastPrice": 1.0}) for c in codes)
+
+        for context in (Echoes(), Canonicalises()):
+            ticks = BigQmtMarketDataProvider(context).get_ticks(
+                ["rb2708.SF", "a2609.DF"])
+            self.assertEqual(sorted(ticks), ["a2609.DF", "rb2708.SF"],
+                             context.__class__.__name__)
+
+    def test_futures_exchange_tokens_reach_qmt_instead_of_raising(self):
+        """A futures exchange token used to die in normalize_stock_code with
+        "invalid stock code: IF", so a whole-exchange futures snapshot was
+        impossible. It goes through now; whether QMT has the data is its own
+        answer to give (this terminal returns empty for all six)."""
+        class FakeCtx:
+            def __init__(self):
+                self.asked = []
+
+            def get_full_tick(self, codes):
+                self.asked.append(list(codes))
+                return {}
+
+        for token in ("IF", "SF", "DF", "ZF", "INE", "GF"):
+            context = FakeCtx()
+            BigQmtMarketDataProvider(context).get_ticks([token])
+            self.assertEqual(context.asked, [[token]], token)
+
+    def test_a_futures_token_is_never_narrowed_to_stocks(self):
+        """A futures exchange lists only futures -- the token already says what
+        it holds, so there is nothing to narrow and no A-share sector to use."""
+        class FakeCtx:
+            def __init__(self):
+                self.asked = []
+
+            def get_full_tick(self, codes):
+                self.asked.append(list(codes))
+                return {}
+
+        context = FakeCtx()
+        provider = BigQmtMarketDataProvider(context)
+        provider.get_stock_list_in_sector = lambda name: ["600000.SH"]
+
+        provider.get_ticks(["SF"], types=["stock"])
+
+        self.assertEqual(context.asked, [["SF"]])
 
     def test_market_provider_passes_market_codes_to_full_tick(self):
         context = FakeContext()

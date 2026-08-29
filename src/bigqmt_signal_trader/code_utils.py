@@ -5,6 +5,16 @@ import re
 
 _DIGIT_CODE_RE = re.compile(r"^\d{6}$")
 
+# Tokens that name a whole exchange rather than one instrument.
+#
+# Stock markets are what get_markets() reports, so they stay their own set.
+# Futures exchanges are listed separately because a futures exchange carries
+# only futures: the token already says what kind of instrument it holds, so
+# nothing has to be narrowed or asked of the caller there (issues #95, #104).
+STOCK_MARKET_CODES = frozenset({"SH", "SZ", "BJ", "HK"})
+FUTURES_MARKET_CODES = frozenset({"IF", "SF", "DF", "ZF", "INE", "GF"})
+EXCHANGE_TOKENS = STOCK_MARKET_CODES | FUTURES_MARKET_CODES
+
 
 # QMT ContextInfo uses market-specific suffixes for all instrument types.
 _QMT_SUFFIXES = (
