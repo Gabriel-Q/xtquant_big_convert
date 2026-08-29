@@ -5,10 +5,12 @@ import json
 import pickle
 import time
 
-from .code_utils import normalize_stock_code
+from .code_utils import EXCHANGE_TOKENS, normalize_stock_code
 
 
-MARKET_CODES = {"SH", "SZ", "BJ", "HK"}
+# Whole-exchange tokens, futures included: a token that normalize_stock_code
+# would reject must not reach it (issue #95).
+MARKET_CODES = set(EXCHANGE_TOKENS)
 DEMAND_KEY_TEMPLATE = "bigqmt:full_tick:demand:{account_id}"
 CACHE_KEY_TEMPLATE = "bigqmt:full_tick:cache:{account_id}:{request_id}"
 
