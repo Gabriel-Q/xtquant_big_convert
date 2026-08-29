@@ -864,6 +864,39 @@ def ipo_market_of(code):
     return None
 
 
+def _full_tick_params(codes, types=None):
+    """RPC params for get_full_tick. `types` narrows a whole-market token to one
+    instrument kind at REQUEST time -- filtering the reply would still pay QMT's
+    per-instrument cost for everything the exchange lists (issue #104)."""
+    params = {"codes": codes}
+    if types:
+        params["types"] = [types] if isinstance(types, str) else list(types)
+    return params
+
+
+_FIELD_LIST_NOTICE = {"shown": False}
+DIRECT_PATH_FIELDS = ("open", "high", "low", "close", "volume", "amount")
+
+
+def _notice_field_list_cost(field_list):
+    """Say once that naming fields is what enables the fast path.
+
+    Not a warning about a mistake: an empty field_list correctly returns all 11
+    columns and only RPC can do that. But the 30x is invisible unless someone
+    tells you it exists (issue #104)."""
+    if field_list or _FIELD_LIST_NOTICE["shown"]:
+        return
+    _FIELD_LIST_NOTICE["shown"] = True
+    try:
+        log.info(
+            "get_market_data_ex with an empty field_list returns all 11 columns "
+            "and must go over RPC. If the six OHLCV columns %s are enough, pass "
+            "them as field_list -- that path is served by FormulaServer, ~30x "
+            "faster (0.03s vs 0.97s measured).", ", ".join(DIRECT_PATH_FIELDS))
+    except Exception:
+        pass
+
+
 # Bar subscriptions poll, because there is no server-side push for K-lines: the
 # bridge only exposes ContextInfo.subscribe_whole_quote, which carries ticks.
 # Interval is a floor on how stale a bar can be, not a promise of freshness.
@@ -973,7 +1006,7 @@ class BigQmtXtData:
     def _call(self, method, **params):
         return self.client.call(method, params)
 
-    def get_full_tick(self, code_list, timeout_seconds=None):
+    def get_full_tick(self, code_list, timeout_seconds=None, types=None):
         """Fetch full tick data for a list of codes.
 
         Args:
@@ -1013,14 +1046,14 @@ class BigQmtXtData:
             # Symbol-list miss (cold start / expired snapshot): fall back to a live
             # RPC so the first call is ~ms instead of a hard wait_seconds stall.
             rpc_timeout = timeout_seconds if timeout_seconds is not None else None
-            return self.client.call("get_full_tick", {"codes": codes}, timeout_seconds=rpc_timeout) or {}
+            return self.client.call("get_full_tick", _full_tick_params(codes, types), timeout_seconds=rpc_timeout) or {}
         upper_codes = {str(code).strip().upper() for code in codes}
         # Caller-provided timeout takes priority; otherwise auto-detect whole-market.
         if timeout_seconds is not None:
             rpc_timeout = timeout_seconds
         else:
             rpc_timeout = 30 if upper_codes & {"SH", "SZ", "BJ", "HK"} else None
-        return self.client.call("get_full_tick", {"codes": codes}, timeout_seconds=rpc_timeout) or {}
+        return self.client.call("get_full_tick", _full_tick_params(codes, types), timeout_seconds=rpc_timeout) or {}
 
     def get_instrument_detail(self, stock_code):
         return self.client.call("get_instrument_detail", {"code": stock_code}) or {}
@@ -1103,7 +1136,15 @@ class BigQmtXtData:
         its own codes -- the rest are returned.
 
         ``chunk_size=0`` restores the old single-request behaviour.
+
+        An empty ``field_list`` means "every field", which only the RPC path can
+        answer -- FormulaServer serves the six OHLCV columns and returns NaN for
+        settelementPrice / openInterest / preClose / suspendFlag, where RPC has
+        real values (preClose 9.07 against nan, measured). So the default stays
+        on RPC rather than quietly handing back NaN; naming the six fields you
+        actually want is what unlocks the ~30x direct path (issue #104).
         """
+        _notice_field_list_cost(field_list)
         codes = list(stock_list or [])
         base = dict(
             field_list=list(field_list or []),
@@ -1436,9 +1477,14 @@ class BigQmtXtData:
         sub_id = session.subscribe_whole_quote(code_list, callback=callback)
         # The big-QMT whole-quote callback is incremental (changed symbols only),
         # so prime the callback once with a full get_full_tick snapshot.
+        #
+        # types=["all"] deliberately: the push side is ContextInfo's own
+        # subscribe_whole_quote, which is not narrowed, so a narrowed snapshot
+        # would hand the subscriber 2315 stocks and then start pushing all
+        # 26744 instruments. The primer has to cover what the push covers.
         if callback is not None:
             try:
-                callback(self.get_full_tick(code_list))
+                callback(self.get_full_tick(code_list, types=["all"]))
             except Exception:
                 pass
         return sub_id

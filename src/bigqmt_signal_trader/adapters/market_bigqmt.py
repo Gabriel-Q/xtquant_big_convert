@@ -34,6 +34,37 @@ from ..code_utils import normalize_stock_code
 
 MARKET_CODES = {"SH", "SZ", "BJ", "HK"}
 
+# A market token asks QMT for every instrument the exchange lists, and stocks
+# are a small minority: "SH" answers with 26744 instruments of which 2315 (8.7%)
+# are stocks -- the rest is bonds, repos and the like. At a measured ~0.29ms per
+# instrument that is 7.5s for the whole market against 0.88s for the stocks
+# alone, and the cost is strictly linear in instrument count (issue #104).
+#
+# So narrow the REQUEST, not the response: resolve the token to a sector listing
+# and ask QMT only for those codes. Filtering afterwards would still pay for
+# every instrument. The sector lookup is FormulaServer-served (~10ms measured),
+# so it costs nothing next to what it saves.
+#
+# Sector names are QMT's own, verified against a live terminal. Note "北证A股"
+# is NOT one of them -- the Beijing board is "京市A股".
+STOCK_SECTOR_BY_MARKET = {
+    "SH": "上证A股",
+    "SZ": "深证A股",
+    "BJ": "京市A股",
+}
+# Cross-market sectors; results are filtered back to the requested exchange.
+# Not narrowing at all: "all" keeps the market token, i.e. the pre-0.2.15
+# behaviour of returning every instrument the exchange lists.
+DEFAULT_TICK_TYPES = ("stock",)
+
+SECTOR_BY_TYPE = {
+    "stock": "沪深京A股",
+    "fund": "沪深基金",
+    "etf": "沪深ETF",
+    "index": "沪深指数",
+    "convertible": "沪深转债",
+}
+
 
 def normalize_market_or_stock_code(code):
     text = str(code or "").strip().upper()
@@ -423,7 +454,68 @@ class BigQmtMarketDataProvider:
             ),
         ]
 
-    def get_ticks(self, codes):
+    def _sector_codes(self, sector):
+        """Cached sector listing. Membership does not change intraday and the
+        lookup is FormulaServer-served, so once per sector per run is enough."""
+        cache = getattr(self, "_sector_cache", None)
+        if cache is None:
+            cache = self._sector_cache = {}
+        if sector not in cache:
+            try:
+                cache[sector] = list(self.get_stock_list_in_sector(sector) or [])
+            except Exception:
+                cache[sector] = []
+        return cache[sector]
+
+    def _expand_market_token(self, market, types):
+        """Codes of the requested types on one exchange, or None to give up.
+
+        None means "could not narrow", and the caller keeps the market token: a
+        slow answer beats an empty one, the same rule the key mapping below
+        follows.
+        """
+        collected = []
+        for kind in types:
+            kind = str(kind or "").strip().lower()
+            sector = None
+            if kind == "stock":
+                sector = STOCK_SECTOR_BY_MARKET.get(market)
+            if sector is None:
+                sector = SECTOR_BY_TYPE.get(kind)
+            if sector is None:
+                return None          # unknown type: do not silently drop it
+            listing = self._sector_codes(sector)
+            if not listing:
+                return None          # sector unavailable on this terminal
+            suffix = "." + market
+            collected.extend(c for c in listing if str(c).upper().endswith(suffix))
+        seen, unique = set(), []
+        for code in collected:
+            if code not in seen:
+                seen.add(code)
+                unique.append(code)
+        return unique or None
+
+    def _notice_narrowed(self, market, kept, total_hint):
+        """Say once per process that a market token was narrowed.
+
+        The default changed from "everything the exchange lists" to stocks, so
+        a caller who wanted bonds or repos would otherwise just see fewer rows
+        and no reason why.
+        """
+        seen = getattr(self, "_narrow_notified", None)
+        if seen is None:
+            seen = self._narrow_notified = set()
+        if market in seen:
+            return
+        seen.add(market)
+        try:
+            print("[bigqmt_market] %s narrowed to %d %s; pass types=['all'] for "
+                  "every instrument the exchange lists" % (market, kept, total_hint))
+        except Exception:
+            pass
+
+    def get_ticks(self, codes, types=None):
         """Snapshot quotes, keyed the way the CALLER spelled each code.
 
         Codes go to QMT upper-cased, but the futures exchanges use lower-case
@@ -443,6 +535,21 @@ class BigQmtMarketDataProvider:
         """
         requested = list(codes or [])
         normalized_codes = [normalize_market_or_stock_code(code) for code in requested]
+        # Default to stocks. A market token lists every instrument the exchange
+        # carries and stocks are 8.7% of it, so the old default made everyone pay
+        # 7.5s for a 0.9s answer. types=["all"] restores the full listing.
+        wanted = list(types) if types else list(DEFAULT_TICK_TYPES)
+        if not any(str(kind).strip().lower() == "all" for kind in wanted):
+            expanded = []
+            for code in normalized_codes:
+                narrowed = (self._expand_market_token(code, wanted)
+                            if code in MARKET_CODES else None)
+                if narrowed is None:
+                    expanded.append(code)     # not a token, or could not narrow
+                else:
+                    expanded.extend(narrowed)
+                    self._notice_narrowed(code, len(narrowed), "/".join(wanted))
+            normalized_codes = expanded
         data = self.context_info.get_full_tick(normalized_codes) or {}
         if not isinstance(data, dict):
             return data or {}
