@@ -597,6 +597,30 @@ class _AllZeroThenRealClient(FakeClient):
         raise AssertionError("unexpected rpc: %s" % method)
 
 
+class _MissingThenCompleteClient(FakeClient):
+    """First none-adjusted get_market_data_ex returns only the first requested
+    code (server has no raw bars for the rest); after a server-side raw
+    download, subsequent pulls return every code."""
+
+    def __init__(self, cache_dir):
+        super(_MissingThenCompleteClient, self).__init__(cache_dir)
+        self._downloaded = False
+
+    def call(self, method, params=None, account_id=None, timeout_seconds=None):
+        self.calls.append(method)
+        self.call_params.append((method, params))
+        import pandas as pd
+
+        if method == "download_history_data2":
+            self._downloaded = True
+            return True
+        if method == "get_market_data_ex":
+            codes = (params or {}).get("stock_list") or []
+            served = codes if self._downloaded else codes[:1]
+            return {c: pd.DataFrame({"stime": ["20260626", "20260629"], "close": [8.76, 8.73]}) for c in served}
+        raise AssertionError("unexpected rpc: %s" % method)
+
+
 class AdjustedReadSelfHealTest(unittest.TestCase):
     """Reading adjusted bars that come back all-zero must self-heal:
     trigger a server-side raw download, wait, and retry once."""
@@ -611,6 +635,11 @@ class AdjustedReadSelfHealTest(unittest.TestCase):
         from bigqmt_signal_trader.xtquant_compat import BigQmtXtData
 
         return BigQmtXtData(_AllZeroThenRealClient(self.dir))
+
+    def _xt_missing(self):
+        from bigqmt_signal_trader.xtquant_compat import BigQmtXtData
+
+        return BigQmtXtData(_MissingThenCompleteClient(self.dir))
 
     def test_front_read_self_heals_all_zero_to_real(self):
         xt = self._xt()
@@ -630,13 +659,33 @@ class AdjustedReadSelfHealTest(unittest.TestCase):
             [60.0, 60.0],
         )
 
+    def test_none_read_self_heals_missing_codes(self):
+        # Big QMT's raw store is not auto-populated market-wide; a
+        # none-adjusted pull that comes back missing requested codes means
+        # the server has no raw bars for them (2026-08-30 --tick pipeline:
+        # 5225 codes requested, only 8 came back) -- must heal like
+        # adjusted all-zero does.
+        xt = self._xt_missing()
+        data = xt.get_market_data_ex(
+            field_list=["close"], stock_list=["600000.SH", "000001.SZ"], period="1d",
+            dividend_type="none",
+        )
+        # After self-heal the retry returns both requested codes.
+        self.assertEqual(sorted(data.keys()), ["000001.SZ", "600000.SH"])
+        # The heal path must have triggered a server-side raw download.
+        method_calls = [m for m, _ in xt.client.call_params]
+        self.assertIn("download_history_data2", method_calls)
+        # get_market_data_ex called twice: initial partial pull + retry.
+        self.assertEqual(method_calls.count("get_market_data_ex"), 2)
+
     def test_none_read_does_not_self_heal(self):
         xt = self._xt()
         data = xt.get_market_data_ex(
             field_list=["close"], stock_list=["600000.SH"], period="1d",
             dividend_type="none",
         )
-        # none returns whatever the server sent (no heal, single pull).
+        # none read that comes back complete (every requested code served)
+        # does not heal: returns whatever the server sent, single pull.
         self.assertEqual(list(data["600000.SH"]["close"]), [0.0, 8.73])
         method_calls = [m for m, _ in xt.client.call_params]
         self.assertNotIn("download_history_data2", method_calls)

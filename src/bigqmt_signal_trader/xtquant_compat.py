@@ -1727,15 +1727,25 @@ class BigQmtXtData:
             pass
 
     def _heal_adjusted(self, method, params, data, wait_seconds=2.0, timeout_seconds=None):
-        """Self-heal adjusted reads: if the adjusted pull came back all-zero,
-        trigger a server-side raw download, wait for async landing, retry once."""
+        """Self-heal reads served from an unready raw store: if the adjusted
+        pull came back all-zero, or a none-adjusted pull came back missing
+        requested codes, trigger a server-side raw download, wait for async
+        landing, retry once."""
         dividend_type = str(params.get("dividend_type") or "none").lower()
-        if dividend_type in ("", "none"):
-            return data
-        if not self._is_all_zero_any(data):
-            return data
         codes = list(params.get("stock_list") or params.get("stock_code") or [])
         if not codes:
+            return data
+        if dividend_type in ("", "none"):
+            # None-adjusted bars are never zero-filled, so the all-zero
+            # detector does not apply -- but a *missing* code means the server
+            # has no raw bars for it at all. Big QMT's raw store is not
+            # auto-populated market-wide (a --tick pipeline read 8 of 5225
+            # codes on 2026-08-30 because nothing ever downloaded the raw
+            # dailies), so heal that the same way.
+            returned = data.keys() if isinstance(data, dict) else []
+            if all(code in returned for code in codes):
+                return data
+        elif not self._is_all_zero_any(data):
             return data
         self._ensure_server_raw(
             codes,
