@@ -14,6 +14,35 @@
 
 - **qmt_launcher 锁屏防护**：`restart_qmt` 在会话锁屏且需要自动登录时直接拒绝执行（否则关掉终端却登不回去，交易中断）；新增 `session_is_locked()` 检测。
 
+## [0.3.3] - 2026-08-30
+
+### 修复
+
+- **未知 `order_type` 的报错误导性极强**（Issue #92）：传 `order_type=27` 得到的回应是 `action or order_type is required`——可调用方明明传了。报告人因此两次回来贴同一份 traceback，间隔半小时，一字不差；两次都在检查自己的调用。
+
+  真正的原因报错里一个字都没提：**QMT 目录里部署的那份包早于信用委托类型**。这段代码跑在 QMT 里，客户端 `pip install --upgrade` 碰不到它。
+
+  根因是那个检查**没有区分**「没传 order_type」和「传了但不认识」，两种情况共用同一条消息。现在分开：
+
+  - 没传 → 保持原消息 `action or order_type is required`
+  - 传了但不认识 → 说清楚是**哪个值**、**哪个版本**拒绝的、以及**升级客户端没用**
+
+  ```
+  order_type 9999 is not recognised by the package deployed in QMT (0.3.3).
+  Credit order types (27-32, and 40-45 special) need 0.3.1 or newer HERE, in
+  the QMT python directory -- upgrading the client with pip does not change
+  this file. Run xt_trader.sync_deployment(), restart the strategy, then check
+  xtdata.get_deployment_info().
+  ```
+
+  消息是**纯 ASCII** 的：QMT 的日志写入会丢非 ASCII 字符（本项目遇到过中文安装路径被吞成乱码），一条乱码的报错帮不上任何人。这一点由测试钉住。
+
+### 已知限制
+
+- 同 0.3.2。**信用委托类型（27/28/40）仍未实盘验证**——@fengzhizialex 已确认信用账户的资产与持仓正常（Issue #92），下单类型待其完成部署后验证。
+
+---
+
 ## [0.3.2] - 2026-08-30
 
 ### ⚠️ 破坏性变更：`cancel_order_stock` 的返回值
