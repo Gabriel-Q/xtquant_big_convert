@@ -708,6 +708,8 @@ cd D:\国金证券QMT交易端
 
 ## 快速开始
 
+> 第一次部署、只想要最短路径？直接看 [docs/DEPLOY_QUICKSTART.md](docs/DEPLOY_QUICKSTART.md)（单账号五步跑通 + 常见问题表）。
+
 > 前置：客户端已按上面「A. 客户端」装好包；服务端按「B. 服务端」装好所选传输的依赖。下面是从零跑通整套流程的步骤。
 >
 > 只想把配置生成出来的话，跑 [`bigqmt-init`](#配置向导bigqmt-init) 即可——第 3 步的两份配置它会替你写好，选单文件部署还会顺带把构建也做了。
@@ -1196,6 +1198,8 @@ python qmt-trader/scripts/qmt.py buy 600000.SH 100 --price 7.50 --dry-run
 ## 相关文档
 
 - [CHANGELOG.md](CHANGELOG.md) — **版本变更记录**（新增/修复/变更）
+- [docs/DEPLOY_QUICKSTART.md](docs/DEPLOY_QUICKSTART.md) — **单账号部署快速开始**（最短路径 + 部署期常见问题表）
+- [docs/LATENCY_REPORT.md](docs/LATENCY_REPORT.md) — **延迟测试报告**（传输层对比、FormulaServer 直连、下单链路、方法论）
 - [docs/RPC_API_REFERENCE.md](docs/RPC_API_REFERENCE.md) — **全部 RPC 方法参考**（参数、返回值、别名、大 QMT 能力边界）
 - [docs/FORMULA_SERVER_FASTPATH.md](docs/FORMULA_SERVER_FASTPATH.md) — FormulaServer(58600) 直连快速路径：协议、映射表、能力边界与回退行为
 - [docs/SUBSCRIBE_WHOLE_QUOTE_PUSH.md](docs/SUBSCRIBE_WHOLE_QUOTE_PUSH.md) — 全推行情订阅推送机制设计
