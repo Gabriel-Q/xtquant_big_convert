@@ -14,6 +14,79 @@
 
 - **qmt_launcher 锁屏防护**：`restart_qmt` 在会话锁屏且需要自动登录时直接拒绝执行（否则关掉终端却登不回去，交易中断）；新增 `session_is_locked()` 检测。
 
+## [0.3.2] - 2026-08-30
+
+### ⚠️ 破坏性变更：`cancel_order_stock` 的返回值
+
+**撤单以前返回 `True` / `False`，现在返回 `0`（成功）/ `-1`（失败），与 MiniQMT 一致。**
+
+```python
+# 需要改
+if xt_trader.cancel_order_stock(acc, order_id):      # ✗
+# 改成
+if xt_trader.cancel_order_stock(acc, order_id) == 0: # ✓
+```
+
+这是有意向 MiniQMT 契约靠拢。原来的 bool **把判断反过来了**：MiniQMT 的写法是 `== 0`，而 Python 里 `False == 0` 为 True，所以撤单**失败**被读成成功，**成功**被读成失败。而我们自己的异步回调早就在用 `cancel_result=0` 表示成功，同一套 API 的两半互相矛盾。
+
+### 修复
+
+- **返回类型与 MiniQMT 不符**（Issue #113，@tokens-lin）：报的是 `order_stock` 返回字符串而不是数字。顺着查了整个接口面，同类问题三处：
+
+  | 接口 | MiniQMT | 修复前 |
+  |---|---|---|
+  | `order_stock()` | `int`（失败 -1） | `str` 合同编号 |
+  | `cancel_order_stock()` | `int`（0 成功） | `bool` |
+  | `XtOrder.order_id` / `XtTrade.order_id` | `int` | `str` |
+
+  另有一个边角：委托被拒时服务端返回的是**字符串** `"-1"`，它 truthy 且永不等于 `-1`，所以废单也被读成成功。
+
+  大 QMT 没有 int 委托编号可给——`get_trade_detail_data` 只有 `m_strOrderSysID` 字符串。所以订单号做成 int 子类，两种形态同时成立：
+
+  ```python
+  order_id = xt_trader.order_stock(acc, "600000.SH", 23, 100, 11, 10.0, "s", "")
+
+  isinstance(order_id, int)   # True，MiniQMT 写法照常
+  order_id > 0                # True
+  str(order_id)               # '合同编号'，券商原始串
+  xt_trader.cancel_order_stock(acc, order_id)   # 撤单送回原始串
+  ```
+
+  纯数字编号（多数券商）int 值就是那个数字；非数字的给一个稳定正数替身，撤单仍用真实串。存进数据库变成普通 int 也能撤单——客户端记最近 4096 个映射。想要字符串用 `.order_sysid`，它一直是 str。
+
+  同样规则用于回调对象 `XtOrderError` / `XtCancelError` / `XtOrderResponse` 的 `order_id`。
+
+  原有 4 个测试文件里 **9 处断言把旧的字符串/布尔契约写死了**，测试与代码基于同一个错误前提，所以一直全绿。这些断言已改正。
+
+- **多股多日期财务数据只返回 `{'is_copy': None}`**（Issue #115，@jerry87n 精确定位）：QMT 的 pandas 0.22 下，`get_financial_data` 多股 **且** 多日期时返回的是 Panel。Panel 既没有 `.columns` 也没有 `.index`，一路穿过序列化层的 DataFrame 分支和 Series 分支，落到 `__dict__` 兜底——而 `vars(panel)` 是 `{'_data': ..., 'is_copy': None}`，下划线过滤后正好剩那一个。
+
+  不报错，没数据。单股或单日期返回 DataFrame，走得通，所以藏得久。
+
+  pandas 1.0 已删除 Panel，客户端重建不出来，因此现在返回客户端能用的形态：`{股票代码: DataFrame}`，轴标签一并带回。
+
+### 文档
+
+- **README 新增「与 MiniQMT 的兼容性对照」**（Issue #113 的原始诉求）：返回值对照表、int/str 双形态订单号、以及会咬人的行为差异（`types=` 默认值、`account_type` 不会从客户端传到服务端、xtconstant 与 passorder 两套编号）。
+
+- **更正 `qmt_launcher` 一段错误描述**：README 原先称 `login` 模式用 `win32api.SendMessage`、锁屏下也能工作。代码从 #45 起就相反——用 `keybd_event` 物理输入，要求对话框在前台，`session_is_locked()` 为真时直接抛异常拒绝。要**无人值守定时重启**请用 `linkmini` / `bat` / `exe`，只有 `login` 受此限制（Issue #116）。
+
+### 已知限制
+
+- **撤单返回值未实盘验证**：需要一笔真实可撤委托，本机没有。类型层面单测覆盖完整。
+- **Panel 修复未实盘验证**：改动跑在 QMT 内，需部署 + 重启策略后用一次多股多日期真实调用确认。
+- **信用委托仍未实盘验证**（0.3.1 起）：@fengzhizialex 已确认信用账户的**资产与持仓**正常（Issue #92），但 `order_type=27/28/40` 到达券商时是否为对应品种仍待验证。
+- 其余同 0.3.1。
+
+### 部署提醒
+
+Panel 修复在**服务端**（`redis_rpc.py` 跑在 QMT 里），只 `pip install --upgrade` 不生效——要把包拷进 QMT 的 python 目录并**重启策略**：
+
+```python
+xt_trader.sync_deployment()   # 自动拷，不碰 config 文件
+```
+
+---
+
 ## [0.3.1] - 2026-08-30
 
 ### 修复
