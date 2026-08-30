@@ -996,12 +996,28 @@ class BigQmtRpcHandlers:
         action = str(params.get("action") or "").upper()
         if action:
             return action
-        order_type = str(params.get("order_type") or "").upper()
+        raw = params.get("order_type")
+        order_type = str(raw or "").upper()
         if order_type in BUY_ORDER_TYPES:
             return "BUY"
         if order_type in SELL_ORDER_TYPES:
             return "SELL"
+        # Credit operations carry their side in the type itself (issue #103).
+        # 直接还款 moves cash rather than securities and has no side, so it
+        # still needs an explicit action rather than being guessed at.
+        credit = _credit_action_of(raw)
+        if credit:
+            return credit
+        if _credit_optype_of(raw) is not None:
+            raise ValueError(
+                "order_type %s has no implicit buy/sell side; pass action "
+                "explicitly" % raw)
         raise ValueError("action or order_type is required")
+
+    def _credit_order_type_from_params(self, params):
+        """The MiniQMT order_type to forward, when it is a credit operation."""
+        raw = params.get("order_type")
+        return raw if _credit_optype_of(raw) is not None else None
 
     def _handle_submit_order(self, params):
         if self.order_gateway is None:
@@ -1021,6 +1037,7 @@ class BigQmtRpcHandlers:
             price_type=params.get("price_type") or "LIMIT",
             strategy_name=str(params.get("strategy_name") or "bigqmt_rpc"),
             remark=order_tag,
+            order_type=self._credit_order_type_from_params(params),
         )
         if request.action not in ("BUY", "SELL"):
             raise ValueError("action must be BUY or SELL")
@@ -1260,6 +1277,24 @@ def _bool_value(value, default=False):
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _credit_action_of(order_type):
+    try:
+        from bigqmt_signal_trader.adapters.order_bigqmt import credit_action_of
+
+        return credit_action_of(order_type)
+    except Exception:
+        return None
+
+
+def _credit_optype_of(order_type):
+    try:
+        from bigqmt_signal_trader.adapters.order_bigqmt import credit_optype_of
+
+        return credit_optype_of(order_type)
+    except Exception:
+        return None
 
 
 def _deployed_version():

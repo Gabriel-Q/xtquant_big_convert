@@ -329,7 +329,12 @@ class OrderRequest:
         price_type,
         strategy_name,
         remark="",
+        order_type=None,
     ):
+        # MiniQMT-style order_type (xtconstant). Only set for operations a
+        # BUY/SELL action cannot express -- credit financing, repayment and the
+        # special-margin family. None means an ordinary stock order.
+        self.order_type = order_type
         self.signal_id = signal_id
         self.account_id = account_id
         self.action = action

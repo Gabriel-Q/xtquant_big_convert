@@ -5,6 +5,8 @@ The passorder signature follows src/api/qmt_jq_trade.
 
 import hashlib
 
+from xtquant import xtconstant as _xtconstant
+
 from ..code_utils import normalize_stock_code
 from ..exec_events import date_time_seconds
 from ..models import CancelResult, OrderSnapshot, OrderSubmitResult, SignalAction, TradeSnapshot
@@ -19,6 +21,75 @@ PRICE_TYPE_ALIASES = {
     "MARKET_SH_CONVERT_5_LIMIT": 43,
     "MARKET_SZ_CONVERT_5_CANCEL": 47,
 }
+
+
+# MiniQMT's order_type (xtconstant) and passorder's opType are two different
+# numberings. They agree on 27-32 and diverge on the special-margin family:
+#
+#   meaning            xtconstant           passorder opType (API ref 10.1)
+#   融资买入 .. 直接还款   27-32                27-32      same
+#   担保品买入 / 卖出      -- (CREDIT_BUY/SELL)  33 / 34
+#   专项两融              40-45                70-75      DIFFERENT
+#
+# Sending 40 through unchanged would reach passorder as "期货组合开多", so the
+# translation is not optional. Values are taken from xtconstant by NAME: PR #88
+# asserted them as literals and encoded the same mistake in its tests, which is
+# why they passed while the mapping was wrong.
+_XC = _xtconstant
+
+CREDIT_OPTYPE_BY_ORDER_TYPE = {
+    _XC.CREDIT_FIN_BUY: 27,                    # 融资买入
+    _XC.CREDIT_SLO_SELL: 28,                   # 融券卖出
+    _XC.CREDIT_BUY_SECU_REPAY: 29,             # 买券还券
+    _XC.CREDIT_DIRECT_SECU_REPAY: 30,          # 直接还券
+    _XC.CREDIT_SELL_SECU_REPAY: 31,            # 卖券还款
+    _XC.CREDIT_DIRECT_CASH_REPAY: 32,          # 直接还款
+    _XC.CREDIT_FIN_BUY_SPECIAL: 70,            # 专项融资买入
+    _XC.CREDIT_SLO_SELL_SPECIAL: 71,           # 专项融券卖出
+    _XC.CREDIT_BUY_SECU_REPAY_SPECIAL: 72,     # 专项买券还券
+    _XC.CREDIT_DIRECT_SECU_REPAY_SPECIAL: 73,  # 专项直接还券
+    _XC.CREDIT_SELL_SECU_REPAY_SPECIAL: 74,    # 专项卖券还款
+    _XC.CREDIT_DIRECT_CASH_REPAY_SPECIAL: 75,  # 专项直接还款
+}
+
+# Which side of the book each one is, for bookkeeping only -- the opType above
+# is what actually goes to passorder. Repayment operations that move securities
+# are classified by what they do to the holding.
+_CREDIT_BUY_SIDE = frozenset({
+    _XC.CREDIT_FIN_BUY, _XC.CREDIT_BUY_SECU_REPAY,
+    _XC.CREDIT_FIN_BUY_SPECIAL, _XC.CREDIT_BUY_SECU_REPAY_SPECIAL,
+})
+_CREDIT_SELL_SIDE = frozenset({
+    _XC.CREDIT_SLO_SELL, _XC.CREDIT_SELL_SECU_REPAY,
+    _XC.CREDIT_DIRECT_SECU_REPAY,
+    _XC.CREDIT_SLO_SELL_SPECIAL, _XC.CREDIT_SELL_SECU_REPAY_SPECIAL,
+    _XC.CREDIT_DIRECT_SECU_REPAY_SPECIAL,
+})
+
+
+def credit_action_of(order_type):
+    """BUY / SELL for a credit order_type, or None if it is not one.
+
+    直接还款 (32 / 45) moves cash rather than securities, so it has no side;
+    callers must pass an action for it explicitly.
+    """
+    try:
+        value = int(order_type)
+    except (TypeError, ValueError):
+        return None
+    if value in _CREDIT_BUY_SIDE:
+        return SignalAction.BUY.value
+    if value in _CREDIT_SELL_SIDE:
+        return SignalAction.SELL.value
+    return None
+
+
+def credit_optype_of(order_type):
+    """passorder opType for a MiniQMT credit order_type, or None."""
+    try:
+        return CREDIT_OPTYPE_BY_ORDER_TYPE.get(int(order_type))
+    except (TypeError, ValueError):
+        return None
 
 
 def _action_from_offset_flag(offset_flag):
@@ -166,7 +237,14 @@ class BigQmtOrderGateway:
     def submit(self, request):
         passorder = self._require_passorder()
         action = str(request.action).upper()
-        if action == SignalAction.BUY.value:
+        credit_optype = credit_optype_of(getattr(request, "order_type", None))
+        if credit_optype is not None:
+            # A credit operation carries more than a side: mapping it back to
+            # BUY/SELL would turn 融资买入 into an ordinary buy, which is the
+            # bug behind issue #103 -- worse than the rejection it replaced,
+            # because it places a real but different order.
+            op_type = credit_optype
+        elif action == SignalAction.BUY.value:
             op_type = 23
         elif action == SignalAction.SELL.value:
             op_type = 24
