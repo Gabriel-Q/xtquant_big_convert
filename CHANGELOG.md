@@ -37,7 +37,7 @@
 
 - **信用委托未实盘验证**：会下真实的融资融券委托，本机无信用账户。@fengzhizialex 已表示可代为验证。
 - **长列表兜底未实盘验证**：触发条件（超时、返回不全）均为单测模拟。
-- **PyPI 曾落后于 GitHub**：0.2.10 到 0.2.16 只发了 GitHub Release、未上传 PyPI，那段时间 `pip install --upgrade` 取到的一直是 0.2.9。0.3.0 已补上。
+- **PyPI 曾落后于 GitHub**：0.2.10 到 0.2.15 只发了 GitHub Release、未上传 PyPI，那段时间 `pip install --upgrade` 取到的一直是 0.2.9。0.3.1 已上传。
 - 其余同 0.3.0。
 
 ---
