@@ -870,6 +870,29 @@ def ipo_market_of(code):
     return None
 
 
+MARKET_TOKENS = frozenset({"SH", "SZ", "BJ", "HK"})
+# Above this many explicit codes, one RPC's single timeout starts to matter more
+# than the extra payload of reading the exchange and filtering (issue #104).
+LARGE_CODE_LIST = 1000
+# What the fallback reads first. Stocks are 8.7% of an exchange listing, so
+# starting narrow is 1.08s against 7.4s; it widens to "all" only if that misses.
+DEFAULT_FALLBACK_TYPES = ("stock",)
+
+
+def _markets_of(codes):
+    """Market tokens the given suffixed codes live on, or empty if any code
+    carries no recognised suffix -- filtering an exchange read cannot recover a
+    code we cannot place."""
+    markets = set()
+    for code in codes or []:
+        _, _, suffix = str(code).rpartition(".")
+        suffix = suffix.upper()
+        if suffix not in MARKET_TOKENS:
+            return set()
+        markets.add(suffix)
+    return markets
+
+
 def _full_tick_params(codes, types=None):
     """RPC params for get_full_tick. `types` narrows a whole-market token to one
     instrument kind at REQUEST time -- filtering the reply would still pay QMT's
@@ -1101,7 +1124,86 @@ class BigQmtXtData:
             rpc_timeout = timeout_seconds
         else:
             rpc_timeout = 30 if upper_codes & {"SH", "SZ", "BJ", "HK"} else None
-        return self.client.call("get_full_tick", _full_tick_params(codes, types), timeout_seconds=rpc_timeout) or {}
+        try:
+            data = self.client.call(
+                "get_full_tick", _full_tick_params(codes, types),
+                timeout_seconds=rpc_timeout) or {}
+        except Exception:
+            data = None
+            if not self._can_fall_back_to_markets(codes, upper_codes):
+                raise
+        if self._should_fall_back(codes, upper_codes, data):
+            recovered = self._full_tick_via_markets(codes, rpc_timeout, types)
+            if recovered is not None:
+                return recovered
+            if data is None:
+                raise
+        return data or {}
+
+    def _can_fall_back_to_markets(self, codes, upper_codes):
+        """Only an explicit list of suffixed codes can be recovered this way."""
+        if upper_codes & MARKET_TOKENS:
+            return False          # already a whole-market request
+        if len(codes) <= LARGE_CODE_LIST:
+            return False          # small list: a failure here is a real failure
+        return bool(_markets_of(codes))
+
+    def _should_fall_back(self, codes, upper_codes, data):
+        if data is None:
+            return True           # the request raised
+        if not self._can_fall_back_to_markets(codes, upper_codes):
+            return False
+        # Short answer: the server dropped codes, or truncated. Anything missing
+        # is worth one whole-market read rather than silently returning less
+        # than was asked for (issue #104).
+        return len(data) < len(set(str(c) for c in codes))
+
+    def _full_tick_via_markets(self, codes, rpc_timeout, types=None):
+        """Read the exchange(s) these codes live on, then filter to them.
+
+        A long explicit list is one RPC carrying one timeout, so it either fits
+        or loses everything; a market token is a single cheap argument that
+        cannot truncate.
+
+        Narrowed first, "all" only if that came up short. An exchange listing is
+        mostly bonds -- "SH" is 26744 instruments of which 2315 are stocks -- so
+        reading all of it costs 7.4s against 1.08s for the stocks. No reason to
+        pay that when the codes being recovered are stocks (issue #104).
+        """
+        markets = _markets_of(codes)
+        if not markets:
+            return None
+        wanted = set(str(code) for code in codes)
+
+        attempts = [list(types) if types else list(DEFAULT_FALLBACK_TYPES)]
+        if not any(str(k).lower() == "all" for k in attempts[0]):
+            attempts.append(["all"])
+
+        merged = {}
+        for attempt in attempts:
+            merged = {}
+            try:
+                for market in sorted(markets):
+                    snapshot = self.client.call(
+                        "get_full_tick", _full_tick_params([market], attempt),
+                        timeout_seconds=max(rpc_timeout or 0, 60)) or {}
+                    for key, value in snapshot.items():
+                        if str(key) in wanted:
+                            merged[key] = value
+            except Exception:
+                return None
+            if len(merged) >= len(wanted):
+                break          # everything asked for; no need to widen
+
+        log.warning(
+            "get_full_tick: %d codes did not come back directly; re-read %s as "
+            "%s and filtered to %d. A market token with types= is cheaper than "
+            "a list this long.",
+            len(wanted), "/".join(sorted(markets)), "/".join(attempts[-1]
+                                                             if len(merged) < len(wanted)
+                                                             else attempts[0]),
+            len(merged))
+        return merged
 
     def get_deployment_info(self):
         """Where the QMT-side bridge is running from, and which build it is.
