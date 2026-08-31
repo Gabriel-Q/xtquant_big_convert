@@ -14,6 +14,37 @@
 
 - **qmt_launcher 锁屏防护**：`restart_qmt` 在会话锁屏且需要自动登录时直接拒绝执行（否则关掉终端却登不回去，交易中断）；新增 `session_is_locked()` 检测。
 
+## [0.3.5] - 2026-08-31
+
+### 修复
+
+- **长代码列表恢复失败时抛出无意义的错误**（Issue #104，@frank0532 在 0.3.4 上报告）：
+
+  ```
+  File ".../xtquant_compat.py", line 1163, in get_full_tick
+      raise
+  RuntimeError: No active exception to reraise
+  ```
+
+  这是 0.3.1 引入恢复逻辑时留下的 bug。那个 `raise` 在 `except` 块**外面**——except 已经退出，没有活跃异常可重新抛出，于是**真正发生的超时被换成了一条毫无意义的错误**。
+
+  而且重读那边把自己的失败原因也吞了（`except Exception: return None`），所以即便修好 `raise`，仍然没有任何地方知道恢复为什么没成功。
+
+  现在：原始异常按**原类型**重新抛出（写 `except TimeoutError` 的调用方照旧接得住），重读失败的原因写进 warning 日志。
+
+  > 这让报错变得有用，**并不保证超长列表一定能成功**。要全量数据，市场令牌始终更快：`get_full_tick(["SH"], types=["all"])`，7.7s 一次请求。
+
+### 已实盘验证（本次新增）
+
+- ✅ **`subscribe_quote` 的分周期 K 线订阅**（@frank0532 在 #104 问及）：盘中实测 `period="1m"`，210 秒内 4 次回调，bar 时间戳精确间隔 60 秒；`1m` / `5m` / `1d` 均返回 `{code: DataFrame}`，列为 `time/open/high/low/close/volume/amount`。该能力自 0.3.0 起即已具备，此前从未实盘确认过。
+
+### 已知限制
+
+- **`passorder` 被调用但委托不出现**：若桥的策略运行在 QMT 的**编辑器**界面，`passorder` 会静默什么都不做（QMT 文档 1.2：「编辑器里执行的下单函数不会产生实际委托」；回测/模拟信号模式同理）。这不是桥的缺陷，但表现为 `passorder submitted but order not found in system`。请确认策略在**模型交易**界面运行。
+- 其余同 0.3.4：回测「启动 → 停止 → 再启动」、信用委托 27/28/40 到达券商的品种、撤单返回值、订单号双形态、期货行情，均待实盘验证。
+
+---
+
 ## [0.3.4] - 2026-08-30
 
 ### 修复
