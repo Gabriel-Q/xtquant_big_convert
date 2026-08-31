@@ -400,8 +400,9 @@ def _login_via_window(credentials, window_title_prefix=None, appear_timeout_seco
             return
         title = win32gui.GetWindowText(hwnd) or ""
         cls = win32gui.GetClassName(hwnd)
-        # Qt5QWindowIcon 限定：避免把标题前缀相近的资源管理器等窗口当成登录框。
-        if cls == "Qt5QWindowIcon" and title.strip().startswith(prefix):
+        # Qt5QWindowIcon 限定 + 标题包含前缀（不是 startswith——模拟端标题是
+        # 「国金QMT交易端模拟 2.1.19.200」，前缀 "QMT" 在中间；issue #128）。
+        if cls == "Qt5QWindowIcon" and prefix in title:
             acc.append(hwnd)
 
     def _find():
@@ -535,9 +536,13 @@ def _login_via_window(credentials, window_title_prefix=None, appear_timeout_seco
         )
     acc_after_entry = _region_pixels(account_region)
 
-    # 2) 密码：先打 1 个字符验证落在密码框，再打其余——密码绝不许进账号框
+    # 2) 密码：TAB 从账号框过去——布局无关，模拟端（499x354，多三个页签）和
+    #    实盘端（624x443）尺寸不同也通用（issue #128）。先打 1 个字符验证落在
+    #    密码框，再打其余——密码绝不许进账号框。
     pwd_before = _region_pixels(password_region)
-    _click(*password_xy)
+    _key(win32con.VK_TAB)
+    time.sleep(0.2)
+    _select_all()
     _type(password[0])
     time.sleep(0.3)
     if not _region_changed(pwd_before, _region_pixels(password_region)):
@@ -561,7 +566,8 @@ def _login_via_window(credentials, window_title_prefix=None, appear_timeout_seco
         # 自动登录在打字过程中已完成——对话框已关闭，别再点"登录"坐标。
         log.info("login dialog gone mid-entry (auto-login completed); skipping submit click")
         return
-    _click(*login_xy)
+    # 用 Enter 提交而不是点坐标——布局无关（issue #128）。
+    _key(win32con.VK_RETURN)
 
 
 def restart_qmt(install_dir, settle_seconds=5.0, **open_kwargs):

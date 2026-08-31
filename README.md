@@ -478,6 +478,10 @@ pymongo 的 `bson`，两者输出实测逐字节一致），客户端不需要�
 
 大 QMT 基本每天早上要重启一次，卡点在登录框。两条路绕过它：
 
+> **依赖**：进程枚举优先用 `psutil`；Win11 起系统不再带 `wmic`，没有 psutil 时
+> `close_qmt`/`status` 会直接报 `cannot enumerate processes`（issue #128）。
+> 装上即可：`pip install psutil`。
+
 ```bash
 python -m bigqmt_signal_trader.qmt_launcher status  --dir "D:\国金证券QMT交易端_lemo"
 python -m bigqmt_signal_trader.qmt_launcher restart --dir "D:\国金证券QMT交易端_lemo"
