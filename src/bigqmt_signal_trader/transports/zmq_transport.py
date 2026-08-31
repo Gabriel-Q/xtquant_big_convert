@@ -147,6 +147,9 @@ class ZmqTransport(RpcTransport):
         self._response_queue = queue.Queue()
         self._queued_response_count = 0
         self._sent_response_count = 0
+        self._dropped_response_count = 0
+        # 出站堆积让位队列的上限（满时丢最旧，防止背压变成内存膨胀）。
+        self._max_queued_responses = 2000
         # (method, started_at, thread_name) while a handler is running.
         # Reported by the stall watchdog below; None when idle.
         self._in_flight = None
@@ -388,6 +391,21 @@ class ZmqTransport(RpcTransport):
             except Exception as exc:
                 print("%s zmq send failed: %s" % (self.print_prefix, exc))
 
+    def _queue_response(self, identity, payload, reason=""):
+        # 出站堆积时让位排队而不是阻塞 router 线程：队列有上限，满时丢最旧
+        # 并记日志（读类请求超时可重试，比全管道停摆好）。
+        self._queued_response_count += 1
+        self._response_queue.put((identity, payload))
+        if self._response_queue.qsize() > self._max_queued_responses:
+            try:
+                self._response_queue.get_nowait()
+                self._dropped_response_count += 1
+                if self._dropped_response_count <= 5 or self._dropped_response_count % 100 == 0:
+                    print("%s zmq response queue full (%d), dropped oldest (%s)"
+                          % (self.print_prefix, self._max_queued_responses, reason))
+            except queue.Empty:
+                pass
+
     def send_response(self, request, response):
         if self._router is None:
             raise TransportError("zmq server socket is not bound")
@@ -401,13 +419,14 @@ class ZmqTransport(RpcTransport):
             return
         payload = encode_rpc_request_payload(response).encode("utf-8")
         if self._router_thread is not None and threading.current_thread() is not self._router_thread:
-            self._queued_response_count += 1
-            if self._queued_response_count <= 5:
-                print("%s zmq response queued for router thread" % self.print_prefix)
-            self._response_queue.put((identity, payload))
+            self._queue_response(identity, payload, reason="off-thread")
             return
         try:
-            self._router.send_multipart([identity, payload])
+            # 硬阻塞改非阻塞：peer 水位满（出站堆积）时不让位整个 router 线程
+            # ~200ms——改道进队列由 drain 循环重试，线程永不停摆。
+            self._router.send_multipart([identity, payload], self._zmq.DONTWAIT)
+        except self._zmq.Again:
+            self._queue_response(identity, payload, reason="peer-muted")
         except Exception as exc:
             print("%s zmq send failed: %s" % (self.print_prefix, exc))
 
