@@ -511,6 +511,43 @@ python -m bigqmt_signal_trader.qmt_launcher restart --dir "D:\国金证券QMT交
 密码从环境变量 `BIGQMT_LOGIN_USER` / `BIGQMT_LOGIN_PASSWORD` 读，不走命令行参数——argv
 对同机任何进程可见。
 
+#### Python API
+
+除了命令行，也可以在代码/计划任务脚本里直接调函数（语义与 CLI 一致）：
+
+```python
+from bigqmt_signal_trader.qmt_launcher import (
+    close_qmt, open_qmt, restart_qmt,
+    is_qmt_running, find_qmt_processes, wait_until_ready, session_is_locked,
+)
+
+# 关：先礼貌 terminate（QMT 会冲刷本地数据），force_after_seconds 后才强杀。
+# 只终结该安装目录 bin.x64 下的进程；拿不到 exe 路径的进程直接跳过而不是误杀。
+close_qmt(r"D:\国金证券QMT交易端_lemo", force_after_seconds=20)
+
+# 开：mode 见上表（exe/bat/login；linkmini 对本项目不可用）。
+# login 模式自动填账号密码：Alt 解锁前台 + 置顶 + 字段级像素验证打字，
+# 打完逐段验证（账号必须进账号区、密码必须进密码区），错了清空中止，不提交错表单。
+open_qmt(
+    r"D:\国金证券QMT交易端_lemo",
+    mode="login",
+    credentials={"user": "你的账号", "password": "你的密码"},
+    window_title_prefix="QMT",          # 登录框标题包含串（模拟端 "国金QMT交易端模拟" 也能匹配）
+    ready_timeout_seconds=180,          # 等 FormulaServer(58600) 就绪的超时
+)
+
+# 一把重启：close_qmt → 等端口释放 → open_qmt。会话锁屏且需要 login 时直接抛错
+# （而不是关掉终端却登不回去）。
+restart_qmt(r"D:\国金证券QMT交易端_lemo", mode="login",
+            credentials={"user": "...", "password": "..."})
+
+# 状态查询
+is_qmt_running(r"D:\国金证券QMT交易端_lemo")      # 进程在不在
+find_qmt_processes(r"D:\国金证券QMT交易端_lemo")  # [(pid, 进程名, exe 路径)]
+wait_until_ready(port=58600)                       # 阻塞到 FormulaServer 可连接
+session_is_locked()                                # 交互式会话是否锁屏
+```
+
 两个设计要点：
 
 - **按安装目录隔离**。同机常并行跑多个 QMT，`taskkill /im XtItClient.exe` 会误杀别人的
