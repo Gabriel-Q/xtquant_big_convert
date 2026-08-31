@@ -27,6 +27,7 @@ import uuid
 
 from ..adapters.redis_common import decode_text
 from ..redis_rpc import (
+    TYPED_PAYLOAD_FLAG, TYPED_PAYLOAD_MARKER,
     decode_rpc_request_payload,
     encode_rpc_request_payload,
 )
@@ -60,10 +61,15 @@ def _default_zmq_address(account_id, host=None):
 
 def _loads(raw):
     if isinstance(raw, dict):
+        # Already an object (in-process routing): no text to scan, so the
+        # client walks it as before rather than assuming there is nothing.
         return dict(raw)
     text = decode_text(raw)
     text = decode_rpc_request_payload(text)
-    return json.loads(text)
+    response = json.loads(text)
+    if isinstance(response, dict):
+        response[TYPED_PAYLOAD_FLAG] = TYPED_PAYLOAD_MARKER in text
+    return response
 
 
 class ZmqTransport(RpcTransport):
