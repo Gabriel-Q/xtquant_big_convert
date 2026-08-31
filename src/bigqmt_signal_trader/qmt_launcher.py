@@ -452,13 +452,26 @@ def _login_via_window(credentials, window_title_prefix=None, appear_timeout_seco
         return
 
     # 国金 2.1.19 登录框（624x443）控件的相对位置，按比例适配尺寸变化。
+    # 账号框 x 必须避开右侧下拉按钮（~0.66w，点它会展开账号列表——实盘事故），
+    # 密码框 x 避开右侧虚拟键盘图标。
     rect = win32gui.GetWindowRect(handle)
     wx, wy = rect[0], rect[1]
     w = max(rect[2] - rect[0], 1)
     h = max(rect[3] - rect[1], 1)
-    account_xy = (0.68 * w, 0.57 * h)
-    password_xy = (0.48 * w, 0.63 * h)  # 避开右侧虚拟键盘图标
+    account_xy = (0.47 * w, 0.57 * h)
+    password_xy = (0.47 * w, 0.66 * h)
     login_xy = (0.40 * w, 0.79 * h)
+    account_region = (wx + int(0.10 * w), wy + int(0.50 * h), int(0.55 * w), int(0.10 * h))
+    password_region = (wx + int(0.10 * w), wy + int(0.60 * h), int(0.55 * w), int(0.10 * h))
+
+    try:
+        import pyautogui
+    except ImportError:
+        raise QmtLauncherError(
+            "mode='login' needs pyautogui (pip install pyautogui) for field-focus "
+            "verification; without it a missed click can type the password into the "
+            "account field (observed live)."
+        )
 
     def _click(fx, fy):
         user32.SetCursorPos(wx + int(fx), wy + int(fy))
@@ -486,13 +499,61 @@ def _login_via_window(credentials, window_title_prefix=None, appear_timeout_seco
         user32.keybd_event(win32con.VK_CONTROL, 0, 2, 0)
         time.sleep(0.2)
 
+    def _region_pixels(region):
+        img = pyautogui.screenshot(region=region).convert("L")
+        return list(img.getdata())
+
+    def _region_changed(before, after, min_ratio=0.01):
+        if not before or not after or len(before) != len(after):
+            return True
+        diff = sum(1 for a, b in zip(before, after) if abs(a - b) > 24)
+        return diff / float(len(before)) >= min_ratio
+
+    def _cleanup_leak():
+        # 打字落到错误字段时立即清空，绝不让密码以明文留在账号框（实盘事故）。
+        for xy in (account_xy, password_xy):
+            _click(*xy)
+            _select_all()
+            _key(win32con.VK_DELETE)
+
     # Never log the values themselves.
     log.info("entering credentials into window %r (physical input)", prefix)
+
+    # 1) 账号：点击 → 全选 → 输入 → 验证账号区变了、密码区没跟着变
+    acc_before = _region_pixels(account_region)
     _click(*account_xy)
     _select_all()
     _type(user)
+    time.sleep(0.3)
+    if not _region_changed(acc_before, _region_pixels(account_region)):
+        raise QmtLauncherError(
+            "account entry did not land in the account field; aborting before "
+            "typing the password anywhere unsafe."
+        )
+    acc_after_entry = _region_pixels(account_region)
+
+    # 2) 密码：先打 1 个字符验证落在密码框，再打其余——密码绝不许进账号框
+    pwd_before = _region_pixels(password_region)
     _click(*password_xy)
-    _type(password)
+    _type(password[0])
+    time.sleep(0.3)
+    if not _region_changed(pwd_before, _region_pixels(password_region)):
+        # 焦点没在密码框：清空可能落错位置的内容后立即中止。
+        _cleanup_leak()
+        raise QmtLauncherError(
+            "password focus check failed (first char did not land in the password "
+            "field); cleared any leaked input and aborted without submitting."
+        )
+    _type(password[1:])
+    time.sleep(0.3)
+    # 再验证一次：账号区在打完密码后不应有变化（防止密码追加到账号后面）。
+    if _region_changed(acc_after_entry, _region_pixels(account_region), min_ratio=0.20):
+        _cleanup_leak()
+        raise QmtLauncherError(
+            "password appears to have landed in the account field; cleared it and "
+            "aborted without submitting."
+        )
+
     if not _looks_like_login_dialog():
         # 自动登录在打字过程中已完成——对话框已关闭，别再点"登录"坐标。
         log.info("login dialog gone mid-entry (auto-login completed); skipping submit click")
