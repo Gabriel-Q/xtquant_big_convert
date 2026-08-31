@@ -14,6 +14,62 @@
 
 - **qmt_launcher 锁屏防护**：`restart_qmt` 在会话锁屏且需要自动登录时直接拒绝执行（否则关掉终端却登不回去，交易中断）；新增 `session_is_locked()` 检测。
 
+## [0.3.6] - 2026-08-31
+
+### 修复
+
+- **可转债的最小申报量、市场推断与报价精度**（PR #121）：三处同一个原因——代码里没有「债券」这个概念，一律按股票处理。
+
+  | 位置 | 修复前 | 后果 |
+  |---|---|---|
+  | `code_utils.min_lot()` | 可转债返回 100 | `round_buy_volume` 把一手转债算成 `(10 // 100) * 100 == 0`，**单子直接废掉** |
+  | `code_utils.normalize_stock_code()` | 裸 6 位码按「5/6 开头 = 沪市」 | 沪市转债 110/111/113/118/132 都是 `1` 开头，**被判到深市**，拿去下单是另一只票 |
+  | `price_engine._price_precision()` | 只把 15/16/51/52 当 3 位小数 | 转债报价精度同样是 0.001，按 2 位取整会被交易所拒单 |
+
+  是在给 [bigqmt-dashboard](https://github.com/litaolemo/bigqmt_dashboard) 接可转债交易时踩出来的。
+
+- **直连路径对四个字段静默返回 NaN**（Issue #104）：FormulaServer 直连**接受任何字段名**，对它没有的四个字段不报错，而是返回一整列 `NaN`。实盘量的：
+
+  ```
+  field_list=[...11 个字段名...]   0.015s   preClose=nan   suspendFlag=nan
+  field_list=[]                    (RPC)    preClose=9.0   suspendFlag=0
+  ```
+
+  同样的列、同样的形状、快 12 倍、数据静默错了。而这正是有人在被告知「写明字段名能走快路径」之后会做的事——客户端自己还打印了这条提示。
+
+  `settelementPrice` / `openInterest` / `preClose` / `suspendFlag` 是**日频元数据**，不是 K 线数据，所以直连缺的正好是这四个。
+
+  现在沿用 `dividend_type` 与 `period=tick` 已有的规矩：**这条路径答不诚实的请求，交给 RPC**。用白名单（`open/high/low/close/volume/amount/time/stime`）而不是黑名单——不认识的字段名走 RPC 只是慢，猜它「大概能供」则可能静默出错，而这个 bug 正是这么来的。
+
+- **文件损坏时抛裸 `NameError`**（Issue #102，@huliangyu）：他的策略文件第一行是一串 200 字符的 token，不是代码。Python 把它当变量名求值，报出：
+
+  ```
+  File "...\bigqmt_signal_trader_strategy.py", line 1, in <module>
+      MiFBOecYoHXT4UUBBOIr3m5aTVbA5Rbt6OnG52cfBT5EAtPG9kA7kQnEsKu...
+  NameError: name 'MiFBOecYoHXT4UUB...' is not defined
+  ```
+
+  这条报错**看不出文件坏了**，所以第一反应的答复是「可能是版本问题，重新部署」——而那对这个文件无效，**换任何版本都一样报错**。
+
+  加载器现在在 exec 失败时看一眼第一行像不像 Python，像 token 就直说，并明确指出「换版本没用」。判定**故意做窄**：40 字符以上、无空白、字符全在 base64 字母表内——满足这三条的 Python 行只可能是裸标识符，本来就是坏代码。
+
+  两个入口脚本（`BIGQMT_REDIS_DRYRUN.py` / `BIGQMT_ZMQ_BACKTEST.py`）各内联一份；它们是引导包的入口，不能反过来 import 包里的工具。
+
+### 已实盘验证（本版全部改动）
+
+- ✅ **字段守卫**：六列快路径 0.016s 不变；六列 + `preClose` 回落 RPC 返回**真值 9.0**（原为 `nan`）；显式写全 11 列返回四列真值（`preClose=9.0` / `suspendFlag=0` / `openInterest=13`），与 `field_list=[]` 对照一致。1m / 5m / 1d 三周期行为一致，陌生字段名（`turnoverRate` 等）实盘确认回落 RPC。
+- ✅ **损坏文件报错**：端到端跑真实加载器——正常模块照常加载，`undefined_name_here` 仍抛它自己的 `NameError`（守卫够窄），token 文件给出新消息。**并在部署到 QMT 目录后，用 QMT 里那份实际执行的入口脚本复验通过。**
+
+### 说明
+
+- **如果你把入口脚本改过名**（例如 `BIGQMT_REDIS_DRYRUN.py` → `BIGQMT_REDIS.py`），`sync_deployment()` **不会更新它**——它只刷新部署目录里已存在的同名文件。改过名的入口需要手动重新拷一份。
+
+### 已知限制
+
+同 0.3.5：回测「启动 → 停止 → 再启动」、信用委托 27/28/40 到达券商的品种、撤单返回值、订单号双形态、长列表恢复的失败路径、期货行情，均待实盘验证。
+
+---
+
 ## [0.3.5] - 2026-08-31
 
 ### 修复
