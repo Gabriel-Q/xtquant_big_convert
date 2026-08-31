@@ -149,6 +149,24 @@ def configure(**kwargs):
     _config.update(kwargs)
 
 
+def capture_qmt_download_funcs(namespace):
+    """Capture QMT-injected global download funcs from the ENTRY exec namespace.
+
+    QMT injects download_history_data / down_history_data into the strategy
+    entry script's exec namespace (same mechanism as passorder), NOT into this
+    module's globals or builtins — so the _EXTRA_QMT_GLOBAL_FUNCS resolution
+    in _build_config cannot see them and every download RPC was a silent no-op
+    until 2026-08-31. The entry calls this with its globals() and feeds the
+    result to bind_qmt_api(extra_funcs=...).
+    """
+    captured = {}
+    for name in ("download_history_data", "down_history_data", "download_history_data2"):
+        func = (namespace or {}).get(name)
+        if callable(func):
+            captured[name] = func
+    return captured
+
+
 def bind_qmt_api(passorder_func=None, cancel_func=None, get_trade_detail_data_func=None,
                  extra_funcs=None):
     if passorder_func is not None:
