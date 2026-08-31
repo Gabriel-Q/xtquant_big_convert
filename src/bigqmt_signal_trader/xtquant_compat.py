@@ -404,18 +404,22 @@ def _parse_qmt_stime(value):
 
 
 # FormulaServer 快照滞后检测：实测它会把 1m 数据冻结数小时（11:30 后不再
-# 更新，收盘后还在发午间数据）。对直连回答的 intraday 数据做时间差检测，
-# 滞后超阈值就在日志里提示——同一个 (code, period) 每天只警告一次，不刷屏。
+# 更新，收盘后还在发午间数据）。对直连回答的 intraday 数据做时间差检测：
+# 滞后即告警 + 本次自动回落 RPC 桥拿实时数据，并在冷却期内跳过直连
+# （冷却到期自动重新探测，自愈）。
 _FORMULA_STALE_INTRADAY_PERIODS = ("tick", "1m", "3m", "5m", "15m", "30m", "1h")
 _FORMULA_STALE_WARN_LAG_SECONDS = 30 * 60
+_FORMULA_STALE_COOLDOWN_SECONDS = 120.0
 _formula_stale_warned = {}
+_formula_stale_until = {"ts": 0.0}
 
 
-def _warn_stale_formula_bars(data, params):
+def _formula_bars_stale(data, params):
+    """返回 (code, newest_dt, lag_seconds) 或 None。只检测，不告警。"""
     try:
         period = str((params or {}).get("period") or "").lower()
         if period not in _FORMULA_STALE_INTRADAY_PERIODS:
-            return
+            return None
         now = _dt.datetime.now()
         today = now.date()
         for code, df in (data or {}).items():
@@ -434,21 +438,38 @@ def _warn_stale_formula_bars(data, params):
             if newest is None:
                 continue
             lag = (now - newest).total_seconds()
-            stale = (newest.date() < today) or (lag > _FORMULA_STALE_WARN_LAG_SECONDS)
-            if not stale:
-                continue
-            key = (str(code), period, str(today))
-            if _formula_stale_warned.get(key):
-                continue
-            _formula_stale_warned[key] = True
-            log.warning(
-                "FormulaServer data looks stale for %s %s: newest bar %s lags now by %.0fs. "
-                "Live reads for this code/period may return old snapshots; "
-                "use use_formula=False (or subscribe_quote, which already bypasses it).",
-                code, period, newest, lag,
-            )
+            if (newest.date() < today) or (lag > _FORMULA_STALE_WARN_LAG_SECONDS):
+                return (str(code), newest, lag)
     except Exception:
         pass
+    return None
+
+
+def _warn_stale_formula_bars(data, params, hit=None):
+    try:
+        period = str((params or {}).get("period") or "").lower()
+        today = _dt.datetime.now().date()
+        if hit is None:
+            hit = _formula_bars_stale(data, params)
+        if hit is None:
+            return
+        code, newest, lag = hit
+        key = (code, period, str(today))
+        if _formula_stale_warned.get(key):
+            return
+        _formula_stale_warned[key] = True
+        log.warning(
+            "FormulaServer data looks stale for %s %s: newest bar %s lags now by %.0fs. "
+            "Falling back to the RPC bridge for live reads (cooldown %.0fs).",
+            code, period, newest, lag, _FORMULA_STALE_COOLDOWN_SECONDS,
+        )
+    except Exception:
+        pass
+
+
+def _formula_stale_active():
+    """冷却期内跳过公式直连（检测到滞后之后的一段时间）。"""
+    return time.time() < _formula_stale_until.get("ts", 0.0)
 
 
 def _qmt_stime_index(value):
@@ -754,14 +775,28 @@ class BigQmtRpcClient:
         # 盘中形成 bar 轮询）——FormulaServer 的快照可能滞后数小时（实测盘中
         # 11:30 后冻结），形成 bar 只能走 RPC 桥读 QMT 实时数据。
         router = self._formula_router() if use_formula else None
-        if router is not None and router.supports(method):
+        # 冷却期（公式数据刚被检出滞后）只对 get_market_data_ex 跳过直连——
+        # 其他方法是静态参考数据，不受时间序列滞后影响，照常走快速路径。
+        skip_formula = (
+            router is not None
+            and method == "get_market_data_ex"
+            and _formula_stale_active()
+        )
+        if router is not None and router.supports(method) and not skip_formula:
             from .formula_server import Unroutable
 
             try:
                 result = _restore_jsonable(router.call(method, params or {}))
                 if method == "get_market_data_ex":
-                    # 直连快照可能滞后（实测冻结数小时）——intraday 滞后即告警。
-                    _warn_stale_formula_bars(result, params or {})
+                    # 直连快照可能滞后（实测冻结数小时）——滞后即告警、
+                    # 本次调用自动回落 RPC 桥拿实时数据，并进入冷却期
+                    # 让后续调用直接跳过直连（到期重新探测，自愈）。
+                    hit = _formula_bars_stale(result, params or {})
+                    if hit is not None:
+                        _warn_stale_formula_bars(result, params or {}, hit=hit)
+                        _formula_stale_until["ts"] = time.time() + _FORMULA_STALE_COOLDOWN_SECONDS
+                        return self.call(method, params, account_id=account_id,
+                                         timeout_seconds=timeout_seconds, use_formula=False)
                 return result
             except Unroutable:
                 pass

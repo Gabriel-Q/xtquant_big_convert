@@ -863,6 +863,81 @@ class UseFormulaBypassTest(unittest.TestCase):
                          "subscribe_quote 盘中轮询必须 use_formula=False（读实时数据）")
 
 
+class FormulaStaleFailoverTest(unittest.TestCase):
+    """公式滞后自动回落：本次调用回落 RPC 桥、冷却期跳过直连、到期自愈。"""
+
+    def _bar(self, ts):
+        import pandas as pd
+
+        return pd.DataFrame({"stime": [ts], "close": [1.0]})
+
+    def setUp(self):
+        import datetime as _dt
+        from bigqmt_signal_trader import xtquant_compat as xc
+
+        self.xc = xc
+        self.xc._formula_stale_until["ts"] = 0.0
+        self.old_bar = (_dt.datetime.now() - _dt.timedelta(hours=3)).strftime("%Y%m%d%H%M%S")
+        self.fresh_bar = _dt.datetime.now().strftime("%Y%m%d%H%M%S")
+
+    def _client(self, stale):
+        xc = self.xc
+
+        class _Router:
+            def __init__(self):
+                self.calls = 0
+
+            def supports(self, method):
+                return True
+
+            def call(self, method, params):
+                self.calls += 1
+                bar = self.old_bar if stale else self.fresh_bar
+                return {"600000.SH": self._bar(bar)}
+
+        class _Transport:
+            def __init__(self):
+                self.calls = 0
+
+            def send_request(self, request, timeout_seconds):
+                self.calls += 1
+                return {"ok": True, "data": {"fresh": True}}
+
+        router = _Router()
+        router.old_bar = self.old_bar
+        router.fresh_bar = self.fresh_bar
+        router._bar = self._bar
+        transport = _Transport()
+        client = BigQmtRpcClient(account_id="acct", redis_config={"host": "127.0.0.1"})
+        client.transport_name = "zmq"
+        client._transport_instance = transport
+        client._formula_router_instance = router
+        return client, router, transport
+
+    def test_stale_answer_fails_over_to_transport(self):
+        client, router, transport = self._client(stale=True)
+        result = client.call("get_market_data_ex", {"period": "1m"})
+        self.assertEqual(result, {"fresh": True})
+        self.assertEqual(transport.calls, 1)
+
+    def test_cooldown_skips_router(self):
+        client, router, transport = self._client(stale=True)
+        client.call("get_market_data_ex", {"period": "1m"})
+        self.assertEqual(router.calls, 1)
+        client.call("get_market_data_ex", {"period": "1m"})
+        self.assertEqual(router.calls, 1)  # 冷却期内不再付公式成本
+        self.assertEqual(transport.calls, 2)
+
+    def test_cooldown_expiry_restores_formula(self):
+        client, router, transport = self._client(stale=True)
+        client.call("get_market_data_ex", {"period": "1m"})
+        self.xc._formula_stale_until["ts"] = 0.0
+        client2, router2, _ = self._client(stale=False)
+        result = client2.call("get_market_data_ex", {"period": "1m"})
+        self.assertEqual(router2.calls, 1)
+        self.assertNotEqual(result, {"fresh": True})
+
+
 class FormulaStaleWarnTest(unittest.TestCase):
     """FormulaServer 快照滞后检测：intraday 滞后即告警、同日不重复、日线不报。"""
 
