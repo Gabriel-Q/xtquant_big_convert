@@ -6,6 +6,14 @@
 
 ### 修复
 
+- **qmt_launcher login 误输防护**（实盘事故修复）：账号框坐标原本打在右侧下拉箭头上（点它会展开账号列表），导致密码被追加进账号框；坐标改到输入框正中，且每步打完字都做字段级像素验证（账号必须进账号区、密码首字符必须进密码区、打密码期间账号区不许变），失败立即清空泄露并中止，绝不提交错误表单。
+- **zmq 出站堆积硬阻塞**：大 payload（全市场快照几 MB）与冷请求共享管道时，peer 水位满会让 send_multipart 阻塞 ~200ms、拖死 router 线程。内联发送改 DONTWAIT，堵了让位进有界队列逐拍重试（超 2000 丢最旧+记日志）。
+- **linkmini 模式误导**：它起的是迷你终端（无策略编辑器/ContextInfo），对本项目的桥不可用——README 与 docstring 已明确。
+
+## [Unreleased]
+
+### 修复
+
 - **subscribe_quote 盘中推送旧快照**（Issue #104）：订阅轮询默认走 FormulaServer 直连，其快照可能滞后数小时（实盘实测 11:30 后冻结、收盘后仍停在午间数据），导致"刚完成的 bar"被推成数小时前的旧值。订阅轮询改走 RPC 桥读 QMT 实时数据（`use_formula=False`，client.call / get_market_data_ex 新增该开关，默认行为不变）。实盘验证：最新 bar 为 15:00 收盘 bar 而非 11:30 旧快照。
 - **FormulaServer 快照滞后检测 + 自动回落**：intraday（tick/1m/5m/15m/30m/1h）直连回答的最新 bar 滞后超过 30 分钟（或跨日）时，本次调用**自动回落 RPC 桥拿实时数据**（不是只告警），并进入 120s 冷却期——冷却内 get_market_data_ex 直接跳过直连（不付双倍成本），到期自动重新探测（自愈）。告警同 code+period 每日一次。实盘验证：滞后检出 → 回落拿到 15:00 收盘 bar；冷却期跳过；到期恢复直连。
 - **probe_capabilities RPC**（此前已提交）：能力探测接口 + 部署快速开始文档 + 延迟报告 + launcher 锁屏防护。

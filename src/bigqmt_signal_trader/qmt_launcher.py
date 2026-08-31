@@ -4,10 +4,12 @@
 Big QMT has to be restarted most mornings, and the login dialog is the reason
 it cannot simply be dropped into a scheduler. Two ways past it:
 
-* **Passwordless (preferred)** -- ``XtMiniQmt.exe linkMini`` starts MiniQMT
-  against an existing session with no dialog at all. This is what
+* **Passwordless (mini terminal only)** -- ``XtMiniQmt.exe linkMini`` starts
+  MiniQMT against an existing session with no dialog at all. This is what
   ``免密登录qmt.bat`` does. No UI automation, so nothing here depends on a
-  desktop being visible.
+  desktop being visible. NOTE: the mini terminal has no strategy editor and no
+  ContextInfo runtime, so it cannot host the bridge strategy — use it only
+  when a MiniQMT data/trade server is needed alongside, not to run the bridge.
 * **Credential entry** -- for the full terminal (``XtItClient.exe``) the dialog
   is unavoidable. We drive it with PHYSICAL input (``keybd_event`` /
   ``mouse_event`` over ctypes), not ``SendMessage``: message-based typing never
