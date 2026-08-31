@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **subscribe_quote 盘中推送旧快照**（Issue #104）：订阅轮询默认走 FormulaServer 直连，其快照可能滞后数小时（实盘实测 11:30 后冻结、收盘后仍停在午间数据），导致"刚完成的 bar"被推成数小时前的旧值。订阅轮询改走 RPC 桥读 QMT 实时数据（`use_formula=False`，client.call / get_market_data_ex 新增该开关，默认行为不变）。实盘验证：最新 bar 为 15:00 收盘 bar 而非 11:30 旧快照。
+- **probe_capabilities RPC**（此前已提交）：能力探测接口 + 部署快速开始文档 + 延迟报告 + launcher 锁屏防护。
+
+## [Unreleased]
+
 ### 新增
 
 - **能力探测 RPC `probe_capabilities`**：只读探查当前部署暴露了哪些 QMT callable——运行时全局函数绑定（passorder/download/信用等 20 项）、ContextInfo 方法存在性、信用接口只读试调（行数/报错）。部署后跑一次即可确认这台券商 QMT 的能力边界。参考 cfquant 的 credit probe 思路。

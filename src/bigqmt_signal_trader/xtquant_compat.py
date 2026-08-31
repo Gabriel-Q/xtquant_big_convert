@@ -693,7 +693,7 @@ class BigQmtRpcClient:
                 self._formula_router_instance = _Disabled()
         return self._formula_router_instance
 
-    def call(self, method, params=None, account_id=None, timeout_seconds=None):
+    def call(self, method, params=None, account_id=None, timeout_seconds=None, use_formula=True):
         target_account = str(account_id or self.account_id or "")
         if not target_account:
             raise ValueError(_missing_account_id_message())
@@ -702,8 +702,11 @@ class BigQmtRpcClient:
         # FormulaServer, bypassing the strategy process and its GIL. Anything it
         # declines (unmapped method, untranslatable params, server down) raises
         # Unroutable and drops through to the RPC bridge below.
-        router = self._formula_router()
-        if router.supports(method):
+        # use_formula=False 用于必须拿到最新数据的调用（如 subscribe_quote 的
+        # 盘中形成 bar 轮询）——FormulaServer 的快照可能滞后数小时（实测盘中
+        # 11:30 后冻结），形成 bar 只能走 RPC 桥读 QMT 实时数据。
+        router = self._formula_router() if use_formula else None
+        if router is not None and router.supports(method):
             from .formula_server import Unroutable
 
             try:
@@ -1312,9 +1315,14 @@ class BigQmtXtData:
         # Self-heal adjusted reads (all-zero bars -> server raw download + retry).
         return self._heal_adjusted("get_market_data", params, data)
 
-    def _get_market_data_ex_batch(self, params, timeout_seconds=None):
+    def _get_market_data_ex_batch(self, params, timeout_seconds=None, use_formula=True):
         """One RPC's worth of bars, healed and normalized. No caching."""
-        data = self.client.call("get_market_data_ex", params, timeout_seconds=timeout_seconds)
+        if use_formula:
+            data = self.client.call("get_market_data_ex", params, timeout_seconds=timeout_seconds)
+        else:
+            # 只在绕路时显式传参——保持既有调用方/桩签名不变。
+            data = self.client.call("get_market_data_ex", params, timeout_seconds=timeout_seconds,
+                                    use_formula=False)
         # Self-heal adjusted reads (all-zero bars -> server raw download + retry).
         data = self._heal_adjusted("get_market_data_ex", params, data, timeout_seconds=timeout_seconds)
         # Normalize Big QMT's stime-indexed frame to MiniQMT shape (time-indexed).
@@ -1334,6 +1342,7 @@ class BigQmtXtData:
         fill_data=True,
         chunk_size=None,
         timeout_seconds=None,
+        use_formula=True,
     ):
         """Pull bars over RPC, in batches of ``chunk_size`` codes.
 
@@ -1375,7 +1384,8 @@ class BigQmtXtData:
 
         if step <= 0 or len(codes) <= step:
             data = self._get_market_data_ex_batch(
-                dict(base, stock_list=codes), timeout_seconds=timeout_seconds
+                dict(base, stock_list=codes), timeout_seconds=timeout_seconds,
+                use_formula=use_formula,
             )
         else:
             data = {}
@@ -1384,7 +1394,8 @@ class BigQmtXtData:
                 batch = codes[index:index + step]
                 try:
                     part = self._get_market_data_ex_batch(
-                        dict(base, stock_list=batch), timeout_seconds=timeout_seconds
+                        dict(base, stock_list=batch), timeout_seconds=timeout_seconds,
+                        use_formula=use_formula,
                     )
                 except Exception as exc:
                     # Losing one batch must not lose the others: a partial
@@ -1601,9 +1612,13 @@ class BigQmtXtData:
         seq = self._next_seq()
 
         def fetch():
+            # 盘中形成 bar 必须读 QMT 实时数据——FormulaServer 快照可能滞后数
+            # 小时（实测 11:30 后冻结，收盘后还停在午间数据），订阅推送如果走
+            # 直连会把"刚完成的 bar"发成数小时前的旧快照（issue #104 实测）。
             return self.get_market_data_ex(
                 stock_list=[stock_code], period=period,
-                start_time=start_time, end_time=end_time, count=count or 1)
+                start_time=start_time, end_time=end_time, count=count or 1,
+                use_formula=False)
 
         poller = _BarPoller(
             fetch, callback, self._bar_poll_interval_seconds(),

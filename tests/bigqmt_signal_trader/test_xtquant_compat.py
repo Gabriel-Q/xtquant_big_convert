@@ -803,5 +803,65 @@ class XtquantCompatTest(unittest.TestCase):
         self.assertEqual(redis.calls, ["xadd", "publish", "hset"])
 
 
+class UseFormulaBypassTest(unittest.TestCase):
+    """use_formula=False：必须最新数据的调用（subscribe_quote 盘中轮询）
+    不走 FormulaServer 快照直连。"""
+
+    def test_call_with_use_formula_false_skips_router(self):
+        calls = []
+
+        class _FakeRouter:
+            def supports(self, method):
+                return True
+
+            def call(self, method, params):
+                raise AssertionError("router must not be called when use_formula=False")
+
+        class _FakeTransport:
+            def send_request(self, request, timeout_seconds):
+                calls.append(request["method"])
+                return {"ok": True, "data": {"pong": True}}
+
+        client = BigQmtRpcClient(account_id="acct", redis_config={"host": "127.0.0.1"})
+        client.transport_name = "zmq"
+        client._transport_instance = _FakeTransport()
+        client._formula_router_instance = _FakeRouter()
+
+        result = client.call("get_market_data_ex", {"x": 1}, use_formula=False)
+        self.assertEqual(result, {"pong": True})
+        self.assertEqual(calls, ["get_market_data_ex"])
+
+    def test_subscribe_quote_fetch_uses_rpc_not_formula(self):
+        xt = BigQmtXtData(FakeRpcClient())
+        recorded = {}
+
+        def spy(**kwargs):
+            recorded.update(kwargs)
+            return {"acct": None}
+
+        fetch_holder = {}
+
+        from bigqmt_signal_trader.xtquant_compat import _BarPoller
+
+        class _P(_BarPoller):
+            def __init__(self, f, callback, interval, **kwargs):
+                fetch_holder["fetch"] = f
+                super().__init__(f, callback, interval, **kwargs)
+
+        import bigqmt_signal_trader.xtquant_compat as compat_mod
+        compat_mod._BarPoller = _P
+        try:
+            xt.get_market_data_ex = spy
+            xt.subscribe_quote("600000.SH", period="1m", count=1, callback=None)
+        finally:
+            compat_mod._BarPoller = _BarPoller
+
+        fetch = fetch_holder.get("fetch")
+        self.assertIsNotNone(fetch)
+        fetch()
+        self.assertFalse(recorded.get("use_formula", True),
+                         "subscribe_quote 盘中轮询必须 use_formula=False（读实时数据）")
+
+
 if __name__ == "__main__":
     unittest.main()
