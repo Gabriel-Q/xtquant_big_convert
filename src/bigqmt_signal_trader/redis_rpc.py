@@ -1266,10 +1266,22 @@ class BigQmtRpcHandlers:
             # order on the same stock and side (a manual one, or an earlier
             # unfilled order) would silently suppress this warning and leave
             # order_sys_id unfilled with no signal at all (issue #41).
+            # The first thing to check is the strategy's run mode, not the
+            # order. QMT's 模型交易 list has a 运行模式 column that defaults to
+            # 模拟, and in that mode passorder matches internally and never
+            # reaches the broker: the call succeeds, SUBMITTED comes back, and
+            # every lookup finds nothing. This message used to lead with
+            # "check price range / permissions", and a reporter spent two
+            # hours there before finding the mode (issue #122).
             message = (
                 "passorder submitted but order not found in system "
                 "(stock=%s action=%s price=%.2f volume=%d, %d lookup(s)). "
-                "QMT may have silently rejected it (check price range / permissions)."
+                "FIRST check the strategy's run mode: in QMT's 模型交易 list the "
+                "运行模式 column defaults to 模拟, where passorder matches "
+                "internally and never reaches the broker -- switch it to 实盘 "
+                "(a simulated account stays simulated). The editor window and "
+                "backtest/signal modes place no real order either. If the mode "
+                "is already 实盘, then check price range and permissions."
                 % (request.stock_code, request.action, request.price,
                    request.volume, settlement.attempts)
             )
@@ -1858,9 +1870,20 @@ class RedisPubSubRpcService:
         try:
             if self.account_id and account_id and account_id != self.account_id:
                 raise PermissionError("account_id mismatch")
+            _t0 = time.perf_counter() if method == "ping" else 0.0
             result = self.handlers.handle(method, request.get("params") or {})
+            _t1 = time.perf_counter() if method == "ping" else 0.0
             response["data"] = to_jsonable(result)
             response["ok"] = True
+            if method == "ping":
+                try:
+                    from .logging_setup import get_logger
+                    get_logger("rpc").info(
+                        "ping breakdown handle=%.1fms jsonable=%.1fms",
+                        (_t1 - _t0) * 1000.0,
+                        (time.perf_counter() - _t1) * 1000.0)
+                except Exception:
+                    pass
             # Surface server-side diagnostics when the handler recorded one.
             server_error = getattr(self.handlers, "_last_server_error", None)
             if server_error:
