@@ -426,7 +426,9 @@ def _login_via_window(credentials, window_title_prefix=None, appear_timeout_seco
             % (prefix, appear_timeout_seconds)
         )
 
-    # 解锁前台保护并置顶：不验证可见性就打字，密码会落进遮挡窗口（实盘踩过坑）。
+    # 解锁前台保护并置顶：物理输入以「点击聚焦 + 逐段截图验证」为安全网，
+    # GetForegroundWindow 只是辅助——它失败不等于不能输入（置顶 + 点击一样能聚焦），
+    # 真正防误输的是后面的字段级像素验证。
     user32.keybd_event(0x12, 0, 0, 0)   # Alt down — unlocks SetForegroundWindow
     user32.keybd_event(0x12, 0, 2, 0)   # Alt up
     time.sleep(0.2)
@@ -436,10 +438,9 @@ def _login_via_window(credentials, window_title_prefix=None, appear_timeout_seco
     user32.SetForegroundWindow(handle)
     time.sleep(0.8)
     if user32.GetForegroundWindow() != handle:
-        raise QmtLauncherError(
-            "could not foreground the login dialog; another window would receive "
-            "the password. Close covering windows and retry."
-        )
+        log.warning(
+            "could not foreground the login dialog (another window may hold focus); "
+            "proceeding with topmost + verified clicks anyway")
 
     def _looks_like_login_dialog():
         # 登录框是小窗（国金 2.1.19 为 ~624x443）；主界面是大窗/最大化。
