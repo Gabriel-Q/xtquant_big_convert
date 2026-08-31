@@ -403,6 +403,54 @@ def _parse_qmt_stime(value):
     return None
 
 
+# FormulaServer 快照滞后检测：实测它会把 1m 数据冻结数小时（11:30 后不再
+# 更新，收盘后还在发午间数据）。对直连回答的 intraday 数据做时间差检测，
+# 滞后超阈值就在日志里提示——同一个 (code, period) 每天只警告一次，不刷屏。
+_FORMULA_STALE_INTRADAY_PERIODS = ("tick", "1m", "3m", "5m", "15m", "30m", "1h")
+_FORMULA_STALE_WARN_LAG_SECONDS = 30 * 60
+_formula_stale_warned = {}
+
+
+def _warn_stale_formula_bars(data, params):
+    try:
+        period = str((params or {}).get("period") or "").lower()
+        if period not in _FORMULA_STALE_INTRADAY_PERIODS:
+            return
+        now = _dt.datetime.now()
+        today = now.date()
+        for code, df in (data or {}).items():
+            # 公式直连返回的帧时间轴在 stime 列（RangeIndex），
+            # 兼容层归一化后的帧在索引上——两种形态都认。
+            newest_value = None
+            for col in ("stime", "time"):
+                if col in list(getattr(df, "columns", [])):
+                    newest_value = df[col].iloc[-1]
+                    break
+            if newest_value is None:
+                index = getattr(df, "index", None)
+                if index is not None and len(index):
+                    newest_value = index[-1]
+            newest = _parse_qmt_stime(newest_value)
+            if newest is None:
+                continue
+            lag = (now - newest).total_seconds()
+            stale = (newest.date() < today) or (lag > _FORMULA_STALE_WARN_LAG_SECONDS)
+            if not stale:
+                continue
+            key = (str(code), period, str(today))
+            if _formula_stale_warned.get(key):
+                continue
+            _formula_stale_warned[key] = True
+            log.warning(
+                "FormulaServer data looks stale for %s %s: newest bar %s lags now by %.0fs. "
+                "Live reads for this code/period may return old snapshots; "
+                "use use_formula=False (or subscribe_quote, which already bypasses it).",
+                code, period, newest, lag,
+            )
+    except Exception:
+        pass
+
+
 def _qmt_stime_index(value):
     digits = _digits_only(value)
     if len(digits) >= 14:
@@ -710,7 +758,11 @@ class BigQmtRpcClient:
             from .formula_server import Unroutable
 
             try:
-                return _restore_jsonable(router.call(method, params or {}))
+                result = _restore_jsonable(router.call(method, params or {}))
+                if method == "get_market_data_ex":
+                    # 直连快照可能滞后（实测冻结数小时）——intraday 滞后即告警。
+                    _warn_stale_formula_bars(result, params or {})
+                return result
             except Unroutable:
                 pass
         transport = self._transport()

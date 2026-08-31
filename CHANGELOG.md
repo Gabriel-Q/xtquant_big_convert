@@ -7,6 +7,7 @@
 ### 修复
 
 - **subscribe_quote 盘中推送旧快照**（Issue #104）：订阅轮询默认走 FormulaServer 直连，其快照可能滞后数小时（实盘实测 11:30 后冻结、收盘后仍停在午间数据），导致"刚完成的 bar"被推成数小时前的旧值。订阅轮询改走 RPC 桥读 QMT 实时数据（`use_formula=False`，client.call / get_market_data_ex 新增该开关，默认行为不变）。实盘验证：最新 bar 为 15:00 收盘 bar 而非 11:30 旧快照。
+- **FormulaServer 快照滞后检测**：intraday（tick/1m/5m/15m/30m/1h）直连回答的最新 bar 滞后当前时间超过 30 分钟（或跨日）时，在日志里警告一次（同 code+period 每日一次，不刷屏），并提示 use_formula=False 绕路。实测实盘告警正常触发（最新 bar 15:00，滞后 57 分钟）。
 - **probe_capabilities RPC**（此前已提交）：能力探测接口 + 部署快速开始文档 + 延迟报告 + launcher 锁屏防护。
 
 ## [Unreleased]

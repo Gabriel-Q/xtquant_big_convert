@@ -863,5 +863,52 @@ class UseFormulaBypassTest(unittest.TestCase):
                          "subscribe_quote 盘中轮询必须 use_formula=False（读实时数据）")
 
 
+class FormulaStaleWarnTest(unittest.TestCase):
+    """FormulaServer 快照滞后检测：intraday 滞后即告警、同日不重复、日线不报。"""
+
+    def _df(self, bar):
+        import pandas as pd
+
+        return pd.DataFrame({"close": [1.0]}, index=[bar])
+
+    def setUp(self):
+        import datetime as _dt
+        from bigqmt_signal_trader import xtquant_compat as xc
+
+        self.xc = xc
+        self.warns = []
+        self._orig_log = xc.log
+
+        class _L:
+            def warning(_, msg, *a):
+                self.warns.append(msg % a if a else msg)
+
+        xc.log = _L()
+        xc._formula_stale_warned.clear()
+        self.old_bar = (_dt.datetime.now() - _dt.timedelta(hours=3)).strftime("%Y%m%d%H%M%S")
+        self.fresh_bar = _dt.datetime.now().strftime("%Y%m%d%H%M%S")
+
+    def tearDown(self):
+        self.xc.log = self._orig_log
+
+    def test_intraday_stale_bar_warns_once_per_day(self):
+        self.xc._warn_stale_formula_bars({"600000.SH": self._df(self.old_bar)}, {"period": "1m"})
+        self.xc._warn_stale_formula_bars({"600000.SH": self._df(self.old_bar)}, {"period": "1m"})
+        self.assertEqual(len(self.warns), 1)
+        self.assertIn("stale", self.warns[0])
+
+    def test_fresh_bar_does_not_warn(self):
+        self.xc._warn_stale_formula_bars({"600000.SH": self._df(self.fresh_bar)}, {"period": "1m"})
+        self.assertEqual(self.warns, [])
+
+    def test_daily_period_is_not_time_checked(self):
+        self.xc._warn_stale_formula_bars({"600000.SH": self._df(self.old_bar)}, {"period": "1d"})
+        self.assertEqual(self.warns, [])
+
+    def test_bad_input_never_raises(self):
+        self.xc._warn_stale_formula_bars(None, {})
+        self.xc._warn_stale_formula_bars({"X": self._df("not-a-date")}, {"period": "1m"})
+
+
 if __name__ == "__main__":
     unittest.main()
