@@ -1986,8 +1986,6 @@ class BigQmtXtData:
         codes = [str(c) for c in (stock_list or []) if str(c or "").strip()]
         if not codes:
             return {"finished": 0, "total": 0}
-        if self._local_cache() is None:
-            raise RuntimeError("local cache is disabled (set local_cache_enabled=True to download)")
 
         # Server-side download first, for EVERY dividend_type.
         #
@@ -2021,6 +2019,21 @@ class BigQmtXtData:
             # Best-effort: some deployments lack the QMT global; the pull below
             # may still work if the data already exists server-side.
             pass
+
+        if self._local_cache() is None:
+            # local cache disabled: server-side download only (step 1). The
+            # data lands in the server-side DATs, so this is real work -- not
+            # the fake progress download of issue #47. The client pull is
+            # skipped uniformly for every period (tick and bars alike) and
+            # progress is reported per code without any pull.
+            total = len(codes)
+            for index, code in enumerate(codes, 1):
+                if callback is not None:
+                    try:
+                        callback({"finished": index, "total": total, "stockcode": code})
+                    except Exception:
+                        pass
+            return {"finished": total, "total": total}
 
         total = len(codes)
         step = int(chunk_size or 300)

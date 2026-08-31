@@ -570,6 +570,51 @@ class AdjustedDownloadTest(unittest.TestCase):
         result = xt.download_history_data2(["600000.SH"], "1d", dividend_type="front")
         self.assertEqual(result, {"finished": 1, "total": 1})  # adjusted pull still ran
 
+    def test_download_with_cache_disabled_skips_client_pull(self):
+        """local cache controls step 2 uniformly for every period (tick and
+        bars alike): disabled = server-side download only (step 1; data lands
+        in the server-side DATs, so this is real work, not the old fake
+        progress of issue #47), no client pull, no fail-fast."""
+        for period in ("tick", "1d"):
+            xt = self._xt()
+            xt.client.local_cache_config["enabled"] = False
+            result = xt.download_history_data2(
+                ["600000.SH", "000001.SZ"], period, "20260828", "20260828"
+            )
+
+            self.assertEqual(result, {"finished": 2, "total": 2})
+            method_calls = [m for m, _ in xt.client.call_params]
+            self.assertIn("download_history_data2", method_calls)  # server-side download ran
+            self.assertNotIn("get_market_data_ex", method_calls)  # client pull skipped
+
+    def test_download_with_cache_disabled_reports_progress_via_callback(self):
+        xt = self._xt()
+        xt.client.local_cache_config["enabled"] = False
+        seen = []
+        result = xt.download_history_data2(
+            ["600000.SH"], "tick", "20260828", "20260828", callback=seen.append
+        )
+
+        self.assertEqual(result["finished"], 1)
+        self.assertEqual(seen, [{"finished": 1, "total": 1, "stockcode": "600000.SH"}])
+
+    def test_tick_download_with_cache_enabled_pulls_like_bars(self):
+        """tick and bars share one contract: with the cache enabled the
+        download also populates the client-side cache (step 2 runs)."""
+        xt = self._xt()
+        xt.download_history_data2(
+            ["600000.SH"], "tick", "20260828", "20260828"
+        )
+
+        method_calls = [m for m, _ in xt.client.call_params]
+        self.assertIn("download_history_data2", method_calls)
+        self.assertIn("get_market_data_ex", method_calls)
+        self.assertLess(
+            method_calls.index("download_history_data2"),
+            method_calls.index("get_market_data_ex"),
+            "server-side download must precede the pull",
+        )
+
 
 class _AllZeroThenRealClient(FakeClient):
     """First adjusted get_market_data_ex returns all-zero bars (server lacks
