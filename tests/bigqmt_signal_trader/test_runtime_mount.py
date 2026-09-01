@@ -65,6 +65,28 @@ class RuntimeMountBehaviorTest(unittest.TestCase):
             self.assertIs(self._strategy._qmt_api.get(name), func,
                           "%s was not bound by the mounted runtime" % name)
 
+    def test_qmt_mount_captures_every_declared_injected_func(self):
+        """Drift guard: the runtime's mount capture must cover the strategy's
+        declared injected-name set in full. Inject every declared name and
+        require every one to be bound -- a runtime-side stale or hand-copied
+        list drops names and fails here."""
+        injected = {name: _noop for name in self._strategy._QMT_INJECTED_GLOBAL_FUNCS}
+        self.assertGreater(len(injected), 3)  # sanity: a collapsed list must not pass
+        ns = self._mount(injected)
+
+        for name, func in injected.items():
+            self.assertIs(self._strategy._qmt_api.get(name), func,
+                          "%s is declared injectable but was not captured" % name)
+
+    def test_runtime_has_no_hand_copied_name_list(self):
+        """The dedup itself: the runtime must capture via the strategy's
+        helper and must not carry its own copy of the injected-name list
+        (bigqmt_no_redis/DRYRUN_no_redis.py drifted exactly this way and lost
+        download_history_data)."""
+        source = open(RUNTIME_FILE, "rb").read().decode("utf-8")
+        self.assertIn("capture_qmt_injected_funcs(globals())", source)
+        self.assertNotIn("get_hkt_exchange_rate", source)
+
     def test_plain_module_load_binds_nothing(self):
         """A plain import / DRYRUN loader namespace has none of the injected
         names -- the capture must skip silently and bind nothing."""

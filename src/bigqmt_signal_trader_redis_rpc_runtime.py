@@ -38,6 +38,7 @@ if _load_bridge_module is not None:
     _strategy_module = _load_bridge_module("bigqmt_signal_trader_strategy")
     adjust = _strategy_module.adjust
     bind_qmt_api = _strategy_module.bind_qmt_api
+    capture_qmt_injected_funcs = _strategy_module.capture_qmt_injected_funcs
     configure = _strategy_module.configure
     deal_callback = _strategy_module.deal_callback
     handlebar = _strategy_module.handlebar
@@ -50,6 +51,7 @@ else:
     from bigqmt_signal_trader_strategy import (  # noqa: E402
         adjust,
         bind_qmt_api,
+        capture_qmt_injected_funcs,
         configure,
         deal_callback,
         handlebar,
@@ -68,15 +70,8 @@ else:
 # get_ipo_info -> NotImplementedError, download_history_data -> False). A plain
 # import of this module (e.g. the DRYRUN loader) sees none of these names and
 # skips silently; DRYRUN's own explicit bind_runtime_api still governs there.
-_QMT_INJECTED_GLOBAL_FUNCS = (
-    "passorder", "cancel", "get_trade_detail_data",
-    "get_history_trade_detail_data", "get_value_by_order_id", "get_last_order_id",
-    "get_ipo_data", "get_new_purchase_limit", "get_assure_contract",
-    "get_enable_short_contract", "get_unclosed_compacts", "get_closed_compacts",
-    "get_debt_contract", "get_option_subject_position", "get_comb_option",
-    "get_hkt_exchange_rate",
-    "download_history_data", "download_history_data2", "down_history_data",
-)
+# The capture goes through the strategy's capture_qmt_injected_funcs -- the
+# name list lives there and nowhere else, so no local hand-copied tuple.
 
 # QMT re-runs the strategy by re-exec'ing this file while the strategy module
 # stays cached in sys.modules -- reset its state (stop the old RPC service,
@@ -86,8 +81,7 @@ try:
 except NameError:
     pass
 
-_qmt_injected = {name: globals()[name] for name in _QMT_INJECTED_GLOBAL_FUNCS
-                 if callable(globals().get(name))}
+_qmt_injected = capture_qmt_injected_funcs(globals())
 if _qmt_injected:
     bind_qmt_api(extra_funcs=_qmt_injected)
     print("[bigqmt_runtime] bound QMT-injected globals: %s" % sorted(_qmt_injected))
