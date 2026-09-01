@@ -2753,6 +2753,42 @@ class BigQmtXtData:
             _read_close(unresolved, "1d")
         return prices, sources
 
+    def _option_detail_for_analytics(self, stock_code):
+        """Prefer FormulaServer metadata and fall back to the option RPC.
+
+        ``get_option_detail_data`` costs one strategy-thread RPC per contract.
+        A chain therefore paid that latency dozens of times even though
+        FormulaServer's ``getInstrumentDetail`` already exposes the required
+        option fields under ``ExtendInfo``.  Flatten that read-only metadata for
+        analytics; retain the native RPC as the compatibility fallback when a
+        broker build omits any required field.
+        """
+        try:
+            instrument = self.get_instrument_detail(stock_code)
+            if isinstance(instrument, dict) and instrument:
+                detail = dict(instrument)
+                for key in ("ExtendInfo", "extendInfo", "extend_info"):
+                    extended = instrument.get(key)
+                    if isinstance(extended, dict):
+                        for name, value in extended.items():
+                            detail.setdefault(name, value)
+                required = (
+                    _detail_value(detail, "optType", "OptType", "option_type"),
+                    _detail_value(
+                        detail, "OptExercisePrice", "exercise_price", "strike_price"
+                    ),
+                    _detail_value(
+                        detail, "ExpireDate", "EndDelivDate",
+                        "expire_date", "expiry_date"
+                    ),
+                )
+                if all(value not in (None, "") for value in required):
+                    _option_underlying_code(detail)
+                    return detail
+        except Exception:
+            pass
+        return self.get_option_detail_data(stock_code)
+
     def get_option_analytics(
         self,
         opt_code,
@@ -2766,11 +2802,12 @@ class BigQmtXtData:
     ):
         """Return local IV and standard Greeks for one option contract.
 
-        Contract metadata comes from ``get_option_detail_data``.  Missing
-        prices use the requested close first, then latest tick (last trade or
-        best-book midpoint), then daily close.  Reads are batched and explicit
-        prices always win, which also makes the method suitable for caller-
-        supplied bid/ask/mid calculations.
+        Contract metadata comes from FormulaServer when it exposes the required
+        option fields, otherwise from ``get_option_detail_data``.  Missing prices
+        use the requested close first, then latest tick (last trade or best-book
+        midpoint), then daily close.  Reads are batched and explicit prices
+        always win, which also makes the method suitable for caller-supplied
+        bid/ask/mid calculations.
 
         This intentionally does not replace ``get_option_iv``: the original RPC
         remains API-compatible while this method supplies a deterministic
@@ -2779,7 +2816,7 @@ class BigQmtXtData:
         code = str(opt_code or "").strip().upper()
         if not code:
             raise ValueError("opt_code is required")
-        detail = self.get_option_detail_data(code)
+        detail = self._option_detail_for_analytics(code)
         if not isinstance(detail, dict) or not detail:
             raise ValueError("no option detail for %s" % code)
         underlying_code = _option_underlying_code(detail)
@@ -2866,7 +2903,7 @@ class BigQmtXtData:
         for raw_code in codes:
             code = str(raw_code).strip().upper()
             try:
-                detail = self.get_option_detail_data(code)
+                detail = self._option_detail_for_analytics(code)
                 if not isinstance(detail, dict) or not detail:
                     raise ValueError("empty option detail")
                 details[code] = detail
@@ -2892,11 +2929,11 @@ class BigQmtXtData:
         if dividend_yield is None:
             dividend_yield, parity_pair_count, parity_yields_by_strike = (
                 _infer_chain_dividend_yield(
-                details,
-                prices,
-                underlying_price,
-                as_of=as_of,
-                risk_free_rate=risk_free_rate,
+                    details,
+                    prices,
+                    underlying_price,
+                    as_of=as_of,
+                    risk_free_rate=risk_free_rate,
                 )
             )
             if dividend_yield is None:

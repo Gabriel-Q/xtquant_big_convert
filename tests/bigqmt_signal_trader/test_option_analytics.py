@@ -72,6 +72,28 @@ class _UnusedClient(object):
     local_cache_config = {"enabled": False}
 
 
+class _FormulaOptionClient(object):
+    local_cache_config = {"enabled": False}
+
+    def __init__(self):
+        self.calls = []
+
+    def call(self, method, params):
+        self.calls.append((method, params))
+        if method != "get_instrument_detail":
+            raise AssertionError("unexpected RPC fallback: %s" % method)
+        return {
+            "ExpireDate": 20260923,
+            "ExtendInfo": {
+                "OptExercisePrice": 3.0,
+                "OptUndlCode": "510050",
+                "OptUndlMarket": "SH",
+                "OptUndlRiskFreeRate": 0.016883,
+                "optType": "CALL",
+            },
+        }
+
+
 class _FakeOptionData(BigQmtXtData):
     def __init__(self):
         super(_FakeOptionData, self).__init__(_UnusedClient())
@@ -130,6 +152,27 @@ class _FakeOptionData(BigQmtXtData):
 
 
 class ContractAnalyticsTest(unittest.TestCase):
+    def test_formula_instrument_metadata_avoids_per_contract_option_rpc(self):
+        client = _FormulaOptionClient()
+        data = BigQmtXtData(client)
+        as_of = datetime.datetime(2026, 9, 1, 15, 0, 0)
+        option_price = black_scholes_price(
+            "C", 3.055, 3.0, 22.0 / 365.0, 0.016883, 0.25
+        )
+
+        result = data.get_option_analytics(
+            "CALL.SHO",
+            option_price=option_price,
+            underlying_price=3.055,
+            as_of=as_of,
+        )
+
+        self.assertAlmostEqual(result["implied_volatility"], 0.25, places=7)
+        self.assertEqual(
+            client.calls,
+            [("get_instrument_detail", {"code": "CALL.SHO"})],
+        )
+
     def test_one_contract_uses_one_fast_close_request_and_detail_defaults(self):
         data = _FakeOptionData()
         result = data.get_option_analytics("CALL.SHO", as_of=data.as_of)
