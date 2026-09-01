@@ -38,25 +38,53 @@ if _load_bridge_module is not None:
     _strategy_module = _load_bridge_module("bigqmt_signal_trader_strategy")
     adjust = _strategy_module.adjust
     bind_qmt_api = _strategy_module.bind_qmt_api
+    capture_qmt_injected_funcs = _strategy_module.capture_qmt_injected_funcs
     configure = _strategy_module.configure
     deal_callback = _strategy_module.deal_callback
     handlebar = _strategy_module.handlebar
     init = _strategy_module.init
     order_callback = _strategy_module.order_callback
+    reset_app = _strategy_module.reset_app
     set_account_id = _strategy_module.set_account_id
     sync_positions = _strategy_module.sync_positions
 else:
     from bigqmt_signal_trader_strategy import (  # noqa: E402
         adjust,
         bind_qmt_api,
+        capture_qmt_injected_funcs,
         configure,
         deal_callback,
         handlebar,
         init,
         order_callback,
+        reset_app,
         set_account_id,
         sync_positions,
     )
+
+# QMT mounts this file by exec and injects trade/download/query globals into
+# THIS module's namespace (same mechanism as passorder). They are invisible to
+# the strategy module -- its _EXTRA_QMT_GLOBAL_FUNCS resolution checks the
+# strategy module's globals and builtins only -- so without the capture below
+# every trade/download/query RPC is a silent no-op (verified live 2026-09-01:
+# get_ipo_info -> NotImplementedError, download_history_data -> False). A plain
+# import of this module (e.g. the DRYRUN loader) sees none of these names and
+# skips silently; DRYRUN's own explicit bind_runtime_api still governs there.
+# The capture goes through the strategy's capture_qmt_injected_funcs -- the
+# name list lives there and nowhere else, so no local hand-copied tuple.
+
+# QMT re-runs the strategy by re-exec'ing this file while the strategy module
+# stays cached in sys.modules -- reset its state (stop the old RPC service,
+# drop stale subscriptions) or the re-run leaks them.
+try:
+    reset_app()
+except NameError:
+    pass
+
+_qmt_injected = capture_qmt_injected_funcs(globals())
+if _qmt_injected:
+    bind_qmt_api(extra_funcs=_qmt_injected)
+    print("[bigqmt_runtime] bound QMT-injected globals: %s" % sorted(_qmt_injected))
 
 
 ACCOUNT_ID = ""

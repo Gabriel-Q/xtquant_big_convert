@@ -1726,16 +1726,43 @@ class BigQmtXtData:
         except Exception:
             pass
 
+    @staticmethod
+    def _served_codes(data):
+        """Codes the server actually served, across both return shapes:
+        get_market_data_ex is code-keyed ({code: DataFrame}), get_market_data
+        is field-keyed ({field: {code: [..]}}) -- reading keys off the wrong
+        level would make every code look missing."""
+        if not isinstance(data, dict):
+            return set()
+        nested = {code for value in data.values() if isinstance(value, dict) for code in value}
+        return nested if nested else set(data.keys())
+
     def _heal_adjusted(self, method, params, data, wait_seconds=2.0, timeout_seconds=None):
-        """Self-heal adjusted reads: if the adjusted pull came back all-zero,
-        trigger a server-side raw download, wait for async landing, retry once."""
+        """Self-heal reads served from an unready raw store: if the adjusted
+        pull came back all-zero, or a none-adjusted pull came back missing
+        most requested codes, trigger a server-side raw download, wait for
+        async landing, retry once."""
         dividend_type = str(params.get("dividend_type") or "none").lower()
-        if dividend_type in ("", "none"):
-            return data
-        if not self._is_all_zero_any(data):
-            return data
         codes = list(params.get("stock_list") or params.get("stock_code") or [])
         if not codes:
+            return data
+        if dividend_type in ("", "none"):
+            # None-adjusted bars are never zero-filled, so the all-zero
+            # detector does not apply -- a *missing* code means the server
+            # has no raw bars for it at all. Big QMT's raw store is not
+            # auto-populated market-wide (a --tick pipeline read 8 of 5225
+            # codes on 2026-08-30 because nothing ever downloaded the raw
+            # dailies), so heal that the same way. But a full-market read
+            # always has a few codes the server can never serve (delisted,
+            # suspended, no quote permission), and healing on *any* missing
+            # code made those a per-call cost -- raw download + sleep + full
+            # re-read, every time. Heal only when the majority came back
+            # missing: that is the raw-store-not-populated signal.
+            served = self._served_codes(data)
+            missing = sum(1 for code in codes if code not in served)
+            if missing < max(1, len(codes) // 2):
+                return data
+        elif not self._is_all_zero_any(data):
             return data
         self._ensure_server_raw(
             codes,
@@ -1972,12 +1999,15 @@ class BigQmtXtData:
 
         ``download_timeout_seconds`` covers the server-side download only; it is
         generous because a cold code with a wide window can take minutes.
+
+        The server-side download is best-effort while the client pull can still
+        save it (cache enabled), but with the local cache disabled it is the
+        entire job -- its failure raises instead of reporting {finished: total},
+        which would be the fake progress of issue #47.
         """
         codes = [str(c) for c in (stock_list or []) if str(c or "").strip()]
         if not codes:
             return {"finished": 0, "total": 0}
-        if self._local_cache() is None:
-            raise RuntimeError("local cache is disabled (set local_cache_enabled=True to download)")
 
         # Server-side download first, for EVERY dividend_type.
         #
@@ -1996,6 +2026,7 @@ class BigQmtXtData:
         # Adjusted data additionally NEEDS this: QMT computes front/back-adjusted
         # bars from raw bars + dividend factors, and both must exist server-side
         # or the result is all zeros.
+        server_download_error = None
         try:
             self.client.call(
                 "download_history_data2",
@@ -2007,10 +2038,30 @@ class BigQmtXtData:
                 },
                 timeout_seconds=float(download_timeout_seconds),
             )
-        except Exception:
-            # Best-effort: some deployments lack the QMT global; the pull below
-            # may still work if the data already exists server-side.
-            pass
+        except Exception as exc:
+            # Best-effort only while the pull below can still save the
+            # download (data already on the server). With the local cache
+            # disabled there is no pull -- the server-side download is the
+            # whole job, and reporting {finished: total} after a failed one
+            # is the fake progress of issue #47.
+            server_download_error = exc
+
+        if self._local_cache() is None:
+            # local cache disabled: server-side download only (step 1). The
+            # data lands in the server-side DATs, so this is real work -- not
+            # the fake progress download of issue #47. The client pull is
+            # skipped uniformly for every period (tick and bars alike) and
+            # progress is reported per code without any pull.
+            if server_download_error is not None:
+                raise server_download_error
+            total = len(codes)
+            for index, code in enumerate(codes, 1):
+                if callback is not None:
+                    try:
+                        callback({"finished": index, "total": total, "stockcode": code})
+                    except Exception:
+                        pass
+            return {"finished": total, "total": total}
 
         total = len(codes)
         step = int(chunk_size or 300)

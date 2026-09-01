@@ -484,6 +484,32 @@ _EXTRA_QMT_GLOBAL_FUNCS = (
     "down_history_data",
 )
 
+# The full set of QMT-injected global function names (the three trade entry
+# points plus the extras above). Mount sites (the RPC runtime's direct mount)
+# capture whatever is callable from their own exec namespace via
+# capture_qmt_injected_funcs() -- this is the single source for that list; do
+# not hand-copy the names elsewhere.
+_QMT_INJECTED_GLOBAL_FUNCS = (
+    "passorder", "cancel", "get_trade_detail_data",
+) + _EXTRA_QMT_GLOBAL_FUNCS
+
+
+def capture_qmt_injected_funcs(namespace):
+    """Capture QMT-injected global funcs from a mounted entry's exec namespace.
+
+    QMT mounts an entry file by exec and injects these functions into THAT
+    namespace only -- the strategy module's globals/builtins lookups cannot
+    see them -- so a mounted entry must pass its own globals() here and feed
+    the result to bind_qmt_api(extra_funcs=...). Non-callables are skipped,
+    so a plain import namespace binds nothing.
+    """
+    captured = {}
+    for name in _QMT_INJECTED_GLOBAL_FUNCS:
+        func = (namespace or {}).get(name)
+        if callable(func):
+            captured[name] = func
+    return captured
+
 
 def _build_config():
     config = dict(_config)
