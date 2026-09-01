@@ -158,6 +158,38 @@ def _cleanup_old_logs(log_dir, retention_days):
         pass
 
 
+def _detach_existing_handlers(logger):
+    """Drop and CLOSE whatever a previous run left on this logger (issue #139).
+
+    Idempotence cannot live in a module global here. The entry purges every
+    bigqmt_signal_trader module from sys.modules on each start
+    (_clear_local_modules, and reload_deployment does the same), so
+    _initialized is back to False on the next import -- while
+    logging.getLogger("bigqmt") lives in the logging module's own registry,
+    which is never purged. The module state resets, the logger does not, so
+    _setup() kept appending: after a day of restarts one log line was written
+    to bigqmt.log SIXTEEN times.
+
+    close() is the half that is easy to miss. Removing a handler without
+    closing it leaves the file handle open, and TimedRotatingFileHandler then
+    cannot rename its own file:
+
+        PermissionError: [WinError 32] ... 'bigqmt.log' -> 'bigqmt.log.2026-08-31'
+
+    which fired on every log write, and meant rotation never succeeded -- so
+    backupCount pruning never ran and BIGQMT_LOG_RETENTION_DAYS did nothing.
+    """
+    for handler in list(getattr(logger, "handlers", [])):
+        try:
+            logger.removeHandler(handler)
+        except Exception:
+            pass
+        try:
+            handler.close()
+        except Exception:
+            pass
+
+
 def _setup():
     global _initialized
     if _initialized:
@@ -166,6 +198,7 @@ def _setup():
     if logging is None:
         return
     logger = logging.getLogger(_LOGGER_NAME)
+    _detach_existing_handlers(logger)
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
     if not _env_bool("BIGQMT_LOG_ENABLED", True):
