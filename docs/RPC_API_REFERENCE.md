@@ -195,6 +195,13 @@
 | `get_option_undl_data` | `undl_code_ref`(str，空=全市场) | 标的下所有期权 |
 | `get_option_undl` | `opt_code`(str) | 期权的标的代码 |
 
+客户端另提供不依赖 QMT 原生 IV 返回值的本地分析层：
+
+- `xtdata.get_option_analytics(opt_code, ...)`：用合约详情与期权/标的价格计算 IV、Delta、Gamma、Vega、Theta、Rho；默认以一次 `get_market_data_ex(field_list=["close"], count=1)` 补齐两个价格，也可显式传盘口中间价。
+- `xtdata.get_option_chain_analytics(undl_code, dedate, ...)`：整条到期月份批量计算。缺价或违反无套利边界的合约带 `analytics_error`，其余合约继续返回。
+
+这是客户端纯数学扩展，不加入 RPC 白名单，也不改变 `get_option_iv` 的原生兼容语义。利率与波动率均用小数；结果同时给出 `vega`/`rho`（每 1.00 变化）及 `vega_1pct`/`rho_1pct`（每 1 个百分点），Theta 同时给出年/日口径。
+
 ### 3.10 财务扩展 / 因子库
 
 | 方法 | 参数 | 说明 |
