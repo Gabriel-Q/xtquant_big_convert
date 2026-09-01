@@ -1448,6 +1448,12 @@ python qmt-trader/scripts/qmt.py buy 600000.SH 100 --price 7.50 --dry-run
 
 ---
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=litaolemo/xtquant_big_convert&type=Date)](https://www.star-history.com/#litaolemo/xtquant_big_convert&Date)
+
+---
+
 ## 为什么不直接连大 QMT
 
 官方 `xtquant.xttrader.XtQuantTrader` 依赖客户端侧 XtQuantServer 通道。当前国金大 QMT 环境中直接连 `connect()` 返回 `-1`，**交易能力**因此必须放在大 QMT 内部策略进程里，外部通过 RPC 驱动。
