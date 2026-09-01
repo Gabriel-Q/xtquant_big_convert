@@ -106,7 +106,10 @@ class _FakeOptionData(BigQmtXtData):
             "CALL.SHO": {"close": [self.call_price]},
             "PUT.SHO": {"close": [self.put_price]},
         }
+        self.tick_prices = {}
+        self.daily_prices = {}
         self.last_market_request = None
+        self.market_requests = []
 
     def get_option_detail_data(self, stockcode):
         return self.details[stockcode]
@@ -116,7 +119,14 @@ class _FakeOptionData(BigQmtXtData):
 
     def get_market_data_ex(self, **kwargs):
         self.last_market_request = kwargs
-        return {code: self.prices.get(code) for code in kwargs["stock_list"]}
+        self.market_requests.append(kwargs)
+        if kwargs["period"] == "tick":
+            source = self.tick_prices
+        elif kwargs["period"] == "1d":
+            source = self.daily_prices or self.prices
+        else:
+            source = self.prices
+        return {code: source.get(code) for code in kwargs["stock_list"]}
 
 
 class ContractAnalyticsTest(unittest.TestCase):
@@ -161,6 +171,122 @@ class ContractAnalyticsTest(unittest.TestCase):
         self.assertEqual(result["error_count"], 1)
         self.assertNotIn("analytics_error", result["contracts"][0])
         self.assertIn("no-arbitrage bounds", result["contracts"][1]["analytics_error"])
+
+    def test_missing_intraday_close_falls_back_to_tick_last_in_one_batch(self):
+        data = _FakeOptionData()
+        data.prices["CALL.SHO"] = {"close": []}
+        data.prices["PUT.SHO"] = {"close": []}
+        data.tick_prices = {
+            "CALL.SHO": {"lastPrice": [data.call_price]},
+            "PUT.SHO": {"lastPrice": [data.put_price]},
+        }
+
+        result = data.get_option_chain_analytics(
+            "510050.SH", "202609", as_of=data.as_of
+        )
+
+        self.assertEqual(result["valid_count"], 2)
+        self.assertEqual(result["error_count"], 0)
+        self.assertEqual(
+            [item["option_price_source"] for item in result["contracts"]],
+            ["tick_last", "tick_last"],
+        )
+        self.assertEqual(
+            [request["period"] for request in data.market_requests],
+            ["1m", "tick"],
+        )
+
+    def test_tick_midpoint_then_daily_close_are_labelled_fallbacks(self):
+        data = _FakeOptionData()
+        data.prices["CALL.SHO"] = {"close": []}
+        data.tick_prices["CALL.SHO"] = {
+            "lastPrice": [0.0],
+            "bidPrice": [[data.call_price - 0.001]],
+            "askPrice": [[data.call_price + 0.001]],
+        }
+        midpoint = data.get_option_analytics("CALL.SHO", as_of=data.as_of)
+        self.assertEqual(midpoint["option_price_source"], "tick_mid")
+        self.assertAlmostEqual(midpoint["option_price"], data.call_price)
+
+        data = _FakeOptionData()
+        data.prices["CALL.SHO"] = {"close": []}
+        data.daily_prices["CALL.SHO"] = {"close": [data.call_price]}
+        fallback = data.get_option_analytics("CALL.SHO", as_of=data.as_of)
+        self.assertEqual(fallback["option_price_source"], "1d_close")
+        self.assertEqual(
+            [request["period"] for request in data.market_requests],
+            ["1m", "tick", "1d"],
+        )
+
+    def test_chain_infers_dividend_yield_from_put_call_parity(self):
+        data = _FakeOptionData()
+        expected_yield = 0.072
+        years = 22.0 / 365.0
+        # Make the pair share one strike/expiry so parity can infer carry.
+        data.details["PUT.SHO"]["OptExercisePrice"] = 3.0
+        data.call_price = black_scholes_price(
+            "C", data.underlying_price, 3.0, years, 0.016883, 0.25,
+            expected_yield,
+        )
+        # Put-call parity requires prices generated with the same volatility.
+        data.put_price = black_scholes_price(
+            "P", data.underlying_price, 3.0, years, 0.016883, 0.25,
+            expected_yield,
+        )
+        data.prices["CALL.SHO"] = {"close": [data.call_price]}
+        data.prices["PUT.SHO"] = {"close": [data.put_price]}
+
+        result = data.get_option_chain_analytics(
+            "510050.SH", "202609", as_of=data.as_of
+        )
+
+        self.assertEqual(result["dividend_yield_source"], "put_call_parity_median")
+        self.assertEqual(result["dividend_yield_pair_count"], 1)
+        self.assertAlmostEqual(result["dividend_yield"], expected_yield, places=8)
+        self.assertEqual(result["valid_count"], 2)
+
+    def test_boundary_failure_retries_with_same_strike_parity_yield(self):
+        data = _FakeOptionData()
+        years = 22.0 / 365.0
+        rate = 0.016883
+        specs = {
+            "C28.SHO": ("CALL", 2.8, 0.10),
+            "P28.SHO": ("PUT", 2.8, 0.10),
+            "C33.SHO": ("CALL", 3.3, 0.00),
+            "P33.SHO": ("PUT", 3.3, 0.00),
+        }
+        data.details = {}
+        data.prices = {"510050.SH": {"close": [data.underlying_price]}}
+        pair_prices = {}
+        for strike, dividend in ((2.8, 0.10), (3.3, 0.00)):
+            parity = (
+                data.underlying_price * math.exp(-dividend * years)
+                - strike * math.exp(-rate * years)
+            )
+            pair_prices[("CALL", strike)] = max(parity, 0.0) + 0.0005
+            pair_prices[("PUT", strike)] = max(-parity, 0.0) + 0.0005
+        for code, (kind, strike, dividend) in specs.items():
+            data.details[code] = {
+                "ExpireDate": 20260923,
+                "OptExercisePrice": strike,
+                "OptUndlCode": "510050",
+                "OptUndlMarket": "SH",
+                "OptUndlRiskFreeRate": rate,
+                "optType": kind,
+            }
+            data.prices[code] = {"close": [pair_prices[(kind, strike)]]}
+        data.get_option_list = lambda *args, **kwargs: list(specs)
+
+        result = data.get_option_chain_analytics(
+            "510050.SH", "202609", as_of=data.as_of
+        )
+
+        self.assertEqual(result["valid_count"], 4)
+        self.assertEqual(result["error_count"], 0)
+        self.assertTrue(any(
+            item["dividend_yield_source"] == "put_call_parity_strike"
+            for item in result["contracts"]
+        ))
 
 
 if __name__ == "__main__":

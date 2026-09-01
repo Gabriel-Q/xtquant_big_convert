@@ -103,6 +103,176 @@ def _latest_close(market_data, stock_code):
     return number if math.isfinite(number) and number > 0 else None
 
 
+def _latest_field_value(market_data, stock_code, field_name):
+    """Return the newest raw field value from dict/list/DataFrame market data."""
+    if not isinstance(market_data, dict):
+        return None
+    frame = market_data.get(stock_code)
+    if frame is None:
+        frame = market_data.get(str(stock_code).upper())
+    if frame is None:
+        return None
+
+    if hasattr(frame, "columns") and field_name in getattr(frame, "columns", ()):
+        values = frame[field_name]
+        if hasattr(values, "dropna"):
+            values = values.dropna()
+        try:
+            return values.iloc[-1]
+        except Exception:
+            return None
+
+    if isinstance(frame, dict):
+        values = frame.get(field_name)
+        if isinstance(values, dict):
+            if not values:
+                return None
+            return values[sorted(values.keys())[-1]]
+        if isinstance(values, (list, tuple)):
+            if not values:
+                return None
+            # A quote-book field may be either one level array or a time series
+            # of level arrays.  Preserve the newest complete book.
+            if field_name in ("bidPrice", "askPrice"):
+                return values[-1] if isinstance(values[-1], (list, tuple)) else values
+            return values[-1]
+        return values
+
+    if isinstance(frame, (list, tuple)):
+        for row in reversed(frame):
+            if isinstance(row, dict) and field_name in row:
+                return row.get(field_name)
+    return None
+
+
+def _positive_number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def _best_book_level(value):
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            number = _positive_number(item)
+            if number is not None:
+                return number
+        return None
+    return _positive_number(value)
+
+
+def _latest_tick_price(market_data, stock_code):
+    """Return ``(price, source)`` from a tick snapshot/history result.
+
+    Last trade is preferred.  If it is unavailable, a valid best-bid/ask
+    midpoint is less biased than choosing one side; one-sided books still
+    provide a final usable fallback and are labelled explicitly.
+    """
+    last_price = _positive_number(
+        _latest_field_value(market_data, stock_code, "lastPrice")
+    )
+    if last_price is not None:
+        return last_price, "tick_last"
+
+    bid = _best_book_level(
+        _latest_field_value(market_data, stock_code, "bidPrice")
+    )
+    ask = _best_book_level(
+        _latest_field_value(market_data, stock_code, "askPrice")
+    )
+    if bid is not None and ask is not None:
+        return (bid + ask) / 2.0, "tick_mid"
+    if bid is not None:
+        return bid, "tick_bid"
+    if ask is not None:
+        return ask, "tick_ask"
+    return None, None
+
+
+def _infer_chain_dividend_yield(
+        details, prices, underlying_price, as_of=None, risk_free_rate=None):
+    """Infer a robust chain-level continuous yield from put-call parity.
+
+    ETF option calls can legitimately sit below the zero-dividend lower bound.
+    Matching call/put pairs imply ``S*exp(-qT) = C-P+K*exp(-rT)``.  The median
+    across strikes is resistant to stale individual prints and is only accepted
+    within a deliberately broad but finite range.
+    """
+    from .option_analytics import normalize_option_type
+
+    spot = _positive_number(underlying_price)
+    if spot is None:
+        return None, 0, {}
+    valued_at = _option_as_of(as_of)
+    pairs = {}
+    for raw_code, detail in (details or {}).items():
+        code = str(raw_code or "").strip().upper()
+        price = _positive_number((prices or {}).get(code))
+        strike = _positive_number(_detail_value(
+            detail, "OptExercisePrice", "exercise_price", "strike_price"
+        ))
+        expiry_value = _detail_value(
+            detail, "ExpireDate", "EndDelivDate", "expire_date", "expiry_date"
+        )
+        if price is None or strike is None or expiry_value is None:
+            continue
+        try:
+            kind = normalize_option_type(
+                _detail_value(detail, "optType", "OptType", "option_type")
+            )
+            expiry_text = str(expiry_value).strip().replace("-", "")[:8]
+            expiry_at = _dt.datetime.strptime(expiry_text, "%Y%m%d").replace(hour=15)
+        except (TypeError, ValueError):
+            continue
+        years = (expiry_at - valued_at).total_seconds() / (365.0 * 86400.0)
+        if years <= 0:
+            continue
+        rate = risk_free_rate
+        if rate is None:
+            rate = _detail_value(
+                detail, "OptUndlRiskFreeRate", "risk_free_rate", "riskFreeRate"
+            )
+        try:
+            rate = float(rate or 0.0)
+        except (TypeError, ValueError):
+            continue
+        key = (expiry_text, strike)
+        pair = pairs.setdefault(key, {"years": years, "rate": rate})
+        pair[kind] = price
+
+    implied = []
+    implied_by_strike = {}
+    for key, pair in pairs.items():
+        if "C" not in pair or "P" not in pair:
+            continue
+        strike = key[1]
+        years = pair["years"]
+        rate = pair["rate"]
+        discounted_spot = pair["C"] - pair["P"] + strike * math.exp(-rate * years)
+        if discounted_spot <= 0:
+            continue
+        try:
+            value = -math.log(discounted_spot / spot) / years
+        except (ValueError, ZeroDivisionError):
+            continue
+        # Negative carry is possible; very large magnitudes indicate a stale or
+        # mismatched quote/contract and must not contaminate the whole chain.
+        if math.isfinite(value) and -0.10 <= value <= 0.50:
+            implied.append(value)
+            implied_by_strike[key] = value
+    if not implied:
+        return None, 0, {}
+    implied.sort()
+    middle = len(implied) // 2
+    if len(implied) % 2:
+        median = implied[middle]
+    else:
+        median = (implied[middle - 1] + implied[middle]) / 2.0
+    return median, len(implied), implied_by_strike
+
+
 def _detail_value(detail, *names):
     if not isinstance(detail, dict):
         return None
@@ -2434,6 +2604,7 @@ class BigQmtXtData:
         price_period="1m",
         option_price_source="argument",
         underlying_price_source="argument",
+        dividend_yield_source="argument",
     ):
         """Build one contract result from already-fetched metadata and prices."""
         from .option_analytics import calculate_option_analytics
@@ -2489,6 +2660,7 @@ class BigQmtXtData:
             "price_period": str(price_period),
             "option_price_source": option_price_source,
             "underlying_price_source": underlying_price_source,
+            "dividend_yield_source": dividend_yield_source,
             "greek_units": {
                 "vega": "price per 1.00 volatility",
                 "vega_1pct": "price per 1 volatility point",
@@ -2500,6 +2672,87 @@ class BigQmtXtData:
         })
         return result
 
+    def _resolve_option_market_prices(self, stock_codes, price_period="1m"):
+        """Resolve prices in batches and preserve the exact source for each.
+
+        The requested period remains the primary source for backward
+        compatibility.  Missing intraday bars are common for ETF options after
+        hours or before local history has been downloaded, so unresolved codes
+        fall back to the latest tick (last trade, then book midpoint/one side)
+        and finally the daily close.  A whole chain costs at most three batched
+        reads, never one RPC per contract.
+        """
+        codes = []
+        seen = set()
+        for raw_code in stock_codes or []:
+            code = str(raw_code or "").strip().upper()
+            if code and code not in seen:
+                seen.add(code)
+                codes.append(code)
+        prices = {}
+        sources = {}
+        if not codes:
+            return prices, sources
+
+        period = str(price_period or "1m")
+
+        def _read_close(target_codes, requested_period):
+            if not target_codes:
+                return
+            try:
+                data = self.get_market_data_ex(
+                    field_list=["close"],
+                    stock_list=target_codes,
+                    period=requested_period,
+                    count=1,
+                    fill_data=False,
+                ) or {}
+            except Exception as exc:
+                log.warning(
+                    "option price %s close batch failed for %d code(s): %s",
+                    requested_period, len(target_codes), exc,
+                )
+                return
+            for code in target_codes:
+                value = _latest_close(data, code)
+                if value is not None:
+                    prices[code] = value
+                    sources[code] = "%s_close" % requested_period
+
+        def _read_tick(target_codes):
+            if not target_codes:
+                return
+            try:
+                data = self.get_market_data_ex(
+                    field_list=["lastPrice", "bidPrice", "askPrice"],
+                    stock_list=target_codes,
+                    period="tick",
+                    count=1,
+                    fill_data=False,
+                ) or {}
+            except Exception as exc:
+                log.warning(
+                    "option price tick batch failed for %d code(s): %s",
+                    len(target_codes), exc,
+                )
+                return
+            for code in target_codes:
+                value, source = _latest_tick_price(data, code)
+                if value is not None:
+                    prices[code] = value
+                    sources[code] = source
+
+        if period.lower() == "tick":
+            _read_tick(codes)
+        else:
+            _read_close(codes, period)
+            _read_tick([code for code in codes if code not in prices])
+
+        unresolved = [code for code in codes if code not in prices]
+        if unresolved and period.lower() != "1d":
+            _read_close(unresolved, "1d")
+        return prices, sources
+
     def get_option_analytics(
         self,
         opt_code,
@@ -2507,17 +2760,17 @@ class BigQmtXtData:
         underlying_price=None,
         as_of=None,
         risk_free_rate=None,
-        dividend_yield=0.0,
+        dividend_yield=None,
         price_period="1m",
         include_native_iv=False,
     ):
         """Return local IV and standard Greeks for one option contract.
 
         Contract metadata comes from ``get_option_detail_data``.  Missing
-        prices are filled from the latest close for the option and underlying
-        in one ``get_market_data_ex`` request, using only ``close`` so the
-        FormulaServer fast path remains available.  Explicit prices always win,
-        which makes the method suitable for live bid/ask/mid calculations too.
+        prices use the requested close first, then latest tick (last trade or
+        best-book midpoint), then daily close.  Reads are batched and explicit
+        prices always win, which also makes the method suitable for caller-
+        supplied bid/ask/mid calculations.
 
         This intentionally does not replace ``get_option_iv``: the original RPC
         remains API-compatible while this method supplies a deterministic
@@ -2531,36 +2784,39 @@ class BigQmtXtData:
             raise ValueError("no option detail for %s" % code)
         underlying_code = _option_underlying_code(detail)
 
-        market_data = {}
         needed_codes = []
         if option_price is None:
             needed_codes.append(code)
         if underlying_price is None:
             needed_codes.append(underlying_code)
-        if needed_codes:
-            market_data = self.get_market_data_ex(
-                field_list=["close"],
-                stock_list=needed_codes,
-                period=price_period,
-                count=1,
-                fill_data=False,
-            ) or {}
+        prices, sources = self._resolve_option_market_prices(
+            needed_codes, price_period=price_period
+        )
         if option_price is None:
-            option_price = _latest_close(market_data, code)
+            option_price = prices.get(code)
             if option_price is None:
-                raise ValueError("no positive %s close for %s" % (price_period, code))
-            option_source = "%s_close" % price_period
+                raise ValueError(
+                    "no usable market price for %s (tried %s, tick, 1d)"
+                    % (code, price_period)
+                )
+            option_source = sources.get(code, "unknown")
         else:
             option_source = "argument"
         if underlying_price is None:
-            underlying_price = _latest_close(market_data, underlying_code)
+            underlying_price = prices.get(underlying_code)
             if underlying_price is None:
                 raise ValueError(
-                    "no positive %s close for %s" % (price_period, underlying_code)
+                    "no usable market price for %s (tried %s, tick, 1d)"
+                    % (underlying_code, price_period)
                 )
-            underlying_source = "%s_close" % price_period
+            underlying_source = sources.get(underlying_code, "unknown")
         else:
             underlying_source = "argument"
+        if dividend_yield is None:
+            dividend_yield = 0.0
+            dividend_source = "default_zero"
+        else:
+            dividend_source = "argument"
 
         result = self._option_analytics_from_detail(
             code,
@@ -2573,6 +2829,7 @@ class BigQmtXtData:
             price_period=price_period,
             option_price_source=option_source,
             underlying_price_source=underlying_source,
+            dividend_yield_source=dividend_source,
         )
         if include_native_iv:
             try:
@@ -2591,15 +2848,15 @@ class BigQmtXtData:
         underlying_price=None,
         as_of=None,
         risk_free_rate=None,
-        dividend_yield=0.0,
+        dividend_yield=None,
         price_period="1m",
     ):
         """Calculate a whole expiry's IV/Greeks with one batched price read.
 
-        A stale or crossed close can violate no-arbitrage bounds.  Such a
-        contract is retained with ``analytics_error`` rather than aborting the
-        entire chain, so callers can distinguish missing/bad prices from valid
-        Greeks and decide whether to substitute a bid/ask midpoint.
+        When ``dividend_yield`` is omitted, matching call/put prices infer a
+        chain-level yield by put-call parity (median across strikes).  A stale
+        or crossed price can still violate no-arbitrage bounds; that contract
+        is retained with ``analytics_error`` rather than aborting the chain.
         """
         codes = list(self.get_option_list(
             undl_code, dedate, opttype=opttype, isavailavle=isavailavle
@@ -2622,19 +2879,33 @@ class BigQmtXtData:
         price_codes = list(details.keys())
         if underlying_price is None and underlying_code:
             price_codes.append(underlying_code)
-        market_data = self.get_market_data_ex(
-            field_list=["close"],
-            stock_list=price_codes,
-            period=price_period,
-            count=1,
-            fill_data=False,
-        ) if price_codes else {}
-        market_data = market_data or {}
+        prices, sources = self._resolve_option_market_prices(
+            price_codes, price_period=price_period
+        )
         if underlying_price is None:
-            underlying_price = _latest_close(market_data, underlying_code)
-            underlying_source = "%s_close" % price_period
+            underlying_price = prices.get(underlying_code)
+            underlying_source = sources.get(underlying_code, "unknown")
         else:
             underlying_source = "argument"
+        parity_pair_count = 0
+        parity_yields_by_strike = {}
+        if dividend_yield is None:
+            dividend_yield, parity_pair_count, parity_yields_by_strike = (
+                _infer_chain_dividend_yield(
+                details,
+                prices,
+                underlying_price,
+                as_of=as_of,
+                risk_free_rate=risk_free_rate,
+                )
+            )
+            if dividend_yield is None:
+                dividend_yield = 0.0
+                dividend_source = "default_zero"
+            else:
+                dividend_source = "put_call_parity_median"
+        else:
+            dividend_source = "argument"
 
         contracts = []
         for raw_code in codes:
@@ -2646,11 +2917,16 @@ class BigQmtXtData:
                 })
                 continue
             detail = details[code]
-            option_price = _latest_close(market_data, code)
+            option_price = prices.get(code)
+            option_source = sources.get(code, "unknown")
             base = {
                 "option_code": code,
                 "underlying_code": underlying_code,
                 "option_price": option_price,
+                "option_price_source": option_source,
+                "underlying_price_source": underlying_source,
+                "dividend_yield": dividend_yield,
+                "dividend_yield_source": dividend_source,
                 "option_type": _detail_value(detail, "optType", "OptType", "option_type"),
                 "strike_price": _detail_value(
                     detail, "OptExercisePrice", "exercise_price", "strike_price"
@@ -2659,15 +2935,18 @@ class BigQmtXtData:
                     detail, "ExpireDate", "EndDelivDate", "expire_date", "expiry_date"
                 ) or ""),
             }
+            item = None
             try:
                 if underlying_price is None:
-                    raise ValueError("no positive %s close for %s" % (
-                        price_period, underlying_code
-                    ))
+                    raise ValueError(
+                        "no usable market price for %s (tried %s, tick, 1d)"
+                        % (underlying_code, price_period)
+                    )
                 if option_price is None:
-                    raise ValueError("no positive %s close for %s" % (
-                        price_period, code
-                    ))
+                    raise ValueError(
+                        "no usable market price for %s (tried %s, tick, 1d)"
+                        % (code, price_period)
+                    )
                 item = self._option_analytics_from_detail(
                     code,
                     detail,
@@ -2677,18 +2956,57 @@ class BigQmtXtData:
                     risk_free_rate=risk_free_rate,
                     dividend_yield=dividend_yield,
                     price_period=price_period,
-                    option_price_source="%s_close" % price_period,
+                    option_price_source=option_source,
                     underlying_price_source=underlying_source,
+                    dividend_yield_source=dividend_source,
                 )
             except Exception as exc:
-                base["analytics_error"] = str(exc)
-                item = base
+                # The cross-strike median is stable for the chain, but a deep
+                # ITM contract can miss its lower bound by a few ticks because
+                # its own call/put pair was printed at a slightly different
+                # moment.  Retry only that boundary failure with the auditable
+                # same-strike parity yield; never silently clip the price.
+                if (dividend_source == "put_call_parity_median"
+                        and "no-arbitrage bounds" in str(exc)):
+                    expiry_text = str(_detail_value(
+                        detail, "ExpireDate", "EndDelivDate",
+                        "expire_date", "expiry_date"
+                    ) or "").strip().replace("-", "")[:8]
+                    strike = _positive_number(_detail_value(
+                        detail, "OptExercisePrice", "exercise_price",
+                        "strike_price"
+                    ))
+                    strike_yield = parity_yields_by_strike.get((expiry_text, strike))
+                    if strike_yield is not None:
+                        try:
+                            item = self._option_analytics_from_detail(
+                                code,
+                                detail,
+                                option_price,
+                                underlying_price,
+                                as_of=as_of,
+                                risk_free_rate=risk_free_rate,
+                                dividend_yield=strike_yield,
+                                price_period=price_period,
+                                option_price_source=option_source,
+                                underlying_price_source=underlying_source,
+                                dividend_yield_source="put_call_parity_strike",
+                            )
+                        except Exception as retry_exc:
+                            exc = retry_exc
+                if item is None:
+                    base["analytics_error"] = str(exc)
+                    item = base
             contracts.append(item)
 
         valid_count = sum(1 for item in contracts if "analytics_error" not in item)
         return {
             "underlying_code": underlying_code,
             "underlying_price": underlying_price,
+            "underlying_price_source": underlying_source,
+            "dividend_yield": dividend_yield,
+            "dividend_yield_source": dividend_source,
+            "dividend_yield_pair_count": parity_pair_count,
             "dedate": str(dedate),
             "as_of": _option_as_of(as_of).strftime("%Y-%m-%d %H:%M:%S"),
             "price_period": str(price_period),
