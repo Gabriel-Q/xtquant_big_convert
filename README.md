@@ -89,7 +89,15 @@ python -m bigqmt_signal_trader.init_config
 
 - `bigqmt_signal_trader.xtquant_compat`：把旧代码的 `xt_trader` / `xtdata` 调用转成 RPC，无需改业务代码。
 - 兼容 MiniQMT 方法名：`query_stock_asset` / `query_stock_positions` / `query_stock_orders` / `get_full_tick` / `order_stock` 等。
-- 顶层 `xtquant.xtdata.get_stock_type(stock)` 显式转发到 RPC；完整 QMT 的交易日 ContextInfo fallback 会把 `SH/SZ` 转成代表指数代码。委托快照增量暴露 `price_type` / `traded_price`，旧 QMT 不提供时分别保持 `None` / `0.0`。
+- **委托/成交对象补齐 MiniQMT 契约**（0.3.8 起，issue #133）：`query_stock_orders` / `query_stock_trades` 返回的对象新增 `account_type`（xtconstant 数字码，取部署实际配置的类型而非硬编码 2）、`instrument_name`、`secu_account`、`offset_flag`、`direction`，成交多一个 `commission`。
+
+  **`strategy_name` 只对经本桥下的委托有效**：实测 QMT 的 ORDER（120 个属性）和 DEAL（47 个属性）行上**都没有 `m_strStrategyName` —— `get_trade_detail_data` 按策略过滤却从不回报。本桥下的单从自己的委托身份库回填（下单时按作为备注发出的 `user_order_id` 记录）；**手工在终端下的单没有备注，保持为空**。
+
+  `secu_account` 同理恒为空：两种行都不带股东代码。字段保留是为了读到 `""` 而不是 `AttributeError`。
+
+- **`describe_trade_detail_fields(account)` 诊断 RPC**（0.3.8 起）：返回 QMT 自己的 ORDER / DEAL 行上**有哪些属性名**（只返回名字不返回值）。遇到"某字段为空"时，它回答的是"**是终端没给，还是桥没转发**"——这两种从客户端看完全一样。
+
+- **`get_stock_type` 在大 QMT 上不可用，会显式抛错**（0.3.8 起）：服务端走 `ContextInfo.get_stock_type`，而这个 stub 对**任何**代码都返回 `0` —— 实测股票 / ETF / 债券 / 期权、以及各种代码格式全是 0。恒为 0 的"类型"比报错更糟（报错看得见，错的分类看不见），所以改成抛 `NotImplementedError` 并指向真正能用的 `get_instrument_type(code)`，后者实测能区分 `stock` / `fund` / `etf` / `bond` / `index`。完整 QMT 的交易日 ContextInfo fallback 会把 `SH/SZ` 转成代表指数代码。委托快照增量暴露 `price_type` / `traded_price`，旧 QMT 不提供时分别保持 `None` / `0.0`。
 - **完整 xtconstant 枚举**（539 个常量，涵盖原生 MiniQMT 全部 90 个，值逐一比对无改动）：账号类型、委托类型（股票/期货/信用/期权）、报价类型、委托状态、账号状态、`ORDER_TYPE_SET`。
 
 ```python
@@ -408,7 +416,27 @@ xt_trader.sync_deployment()               # 真同步
 | **覆盖前备份** | 每个被覆盖的文件留 `.bak_<时间戳>` |
 | **原子写入** | 先写临时文件再替换，中断不会留下半个模块 |
 
-> **同步之后仍然必须手动重启策略。** QMT 跨重跑保留 `sys.modules`，拷贝本身不生效——每次同步结果都带 `restart_required` 并在日志里提示。
+> **同步之后必须让策略重新加载。** QMT 跨重跑保留 `sys.modules`，拷贝本身不生效——每次同步结果都带 `restart_required` 并在日志里提示。
+
+#### 让同步生效：`reload_deployment()`（0.3.8 起，不用重启）
+
+```python
+xt_trader.reload_deployment("why")   # -> {'scheduled': True, 'version_before': '0.3.7'}
+xt_trader.reload_status()            # -> {'ok': True, 'modules_purged': 28,
+                                     #     'version_before': '0.3.7',
+                                     #     'version_after': '0.3.8', 'seconds': 0.79}
+```
+
+把所有 `bigqmt_signal_trader.*` 从 `sys.modules` 清掉、重新绑定策略模块 import 时持有的引用、再跑一次 `init()` 重建对象图。**约 0.8 秒。**
+
+**只是"已排期"**：执行它要 `reset_app()`，那会停掉正在应答这个请求的 RPC 服务，所以回复必须先发出去；真正的重载在下一个 adjust tick 上做，轮询 `reload_status()` 看结果。期间约 1 秒的查询会超时（服务正在重建）。
+
+| | |
+|---|---|
+| **能刷新** | `bigqmt_signal_trader/` 下的一切——适配器、RPC handler、models、传输层 |
+| **刷新不了** | `bigqmt_signal_trader_strategy.py` 和 `BIGQMT_REDIS_DRYRUN.py`。QMT 自己 exec 这两个文件，**模块没法 reload 自己所在的模块**——改这两个仍要重启策略 |
+
+用 purge 而不是 `importlib.reload`：reload 必须按依赖顺序（`order_bigqmt` 在 import 时 `from ..models import OrderSnapshot`，顺序错了会**静默**留住旧类），purge 没有顺序问题。
 
 **同步逻辑跑在客户端，不在 QMT 里。** 让交易进程盘中改写自己的代码，等于把源码树里的任何东西（包括改到一半的）直接送上实盘。
 
