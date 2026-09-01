@@ -169,7 +169,15 @@ def bind_qmt_api(passorder_func=None, cancel_func=None, get_trade_detail_data_fu
 # A reload asked for over RPC. Deferred to the adjust tick rather than done in
 # the handler, because reset_app() stops the very RPC service that is answering
 # the request -- the reply has to be sent first.
-_reload_request = {"pending": False, "requested_at": 0.0, "by": ""}
+# not_before: the reply to reload_deployment has to reach the client before the
+# transport it would travel on is torn down. Longer than the ZMQ ROUTER's
+# 1s RCVTIMEO, because that is how long its thread can sit in recv_multipart
+# before it loops back to _drain_response_queue and actually sends the reply.
+# _wait_for_responses_to_flush is the real guarantee; this is the floor.
+_RELOAD_GRACE_SECONDS = 1.5
+_RELOAD_FLUSH_TIMEOUT_SECONDS = 5.0
+_reload_request = {"pending": False, "requested_at": 0.0, "not_before": 0.0,
+                   "by": ""}
 _reload_result = {}
 
 
@@ -195,6 +203,7 @@ def request_reload(reason=""):
     """
     _reload_request["pending"] = True
     _reload_request["requested_at"] = time.time()
+    _reload_request["not_before"] = time.time() + _RELOAD_GRACE_SECONDS
     _reload_request["by"] = str(reason or "")
     return {
         "scheduled": True,
@@ -279,6 +288,49 @@ def _rebind_module_level_imports():
     _exec_events = _load_exec_events()
 
 
+def _pending_response_count():
+    """How many RPC replies the transport has queued but not yet sent."""
+    transport = getattr(_rpc_service, "_transport", None) if _rpc_service else None
+    pending = getattr(transport, "_response_queue", None)
+    if pending is None:
+        return 0
+    try:
+        return pending.qsize()
+    except Exception:
+        return 0
+
+
+def _wait_for_responses_to_flush(timeout_seconds=None):
+    """Let the transport send what is queued before reset_app() tears it down.
+
+    The reply to reload_deployment is put on the ZMQ transport's response queue
+    by the handler, and the ROUTER thread sends it at the top of its next loop
+    -- a loop that can be sitting in recv_multipart for up to RCVTIMEO (1s),
+    and that needs the GIL this thread is holding. Sleeping yields both.
+
+    Sending from here instead is not an option: the ROUTER socket belongs to
+    that thread and ZMQ sockets are not thread-safe -- the same reason it closes
+    its own socket in its finally block.
+
+    Without this the reload SUCCEEDS and the caller still sees a timeout, which
+    is indistinguishable from a reload that killed the bridge. That is what the
+    first two live attempts did: "responded method=reload_deployment ok=True"
+    and "[bigqmt_reload] ok purged=28" in the terminal, TransportTimeout at the
+    client.
+    """
+    if timeout_seconds is None:
+        timeout_seconds = _RELOAD_FLUSH_TIMEOUT_SECONDS
+    deadline = time.time() + max(0.0, timeout_seconds)
+    while time.time() < deadline:
+        if _pending_response_count() == 0:
+            # qsize() drops when the sender dequeues, which is just BEFORE the
+            # send. One more yield so that send completes.
+            time.sleep(0.2)
+            return True
+        time.sleep(0.05)
+    return False
+
+
 def _perform_reload(context_info):
     """Purge, re-import, re-init. Runs on the adjust thread."""
     global _reload_result
@@ -287,8 +339,14 @@ def _perform_reload(context_info):
     before = _package_version()
     result = {"ok": False, "version_before": before, "version_after": "",
               "modules_purged": 0, "seconds": 0.0, "error": "",
-              "by": _reload_request["by"]}
+              "replies_flushed": False, "by": _reload_request["by"]}
     try:
+        result["replies_flushed"] = _wait_for_responses_to_flush()
+        if not result["replies_flushed"]:
+            print("[bigqmt_reload] WARNING: %d reply/replies still queued after "
+                  "%.0fs; the caller may see a timeout even though the reload "
+                  "runs" % (_pending_response_count(),
+                            _RELOAD_FLUSH_TIMEOUT_SECONDS))
         reset_app()
         result["modules_purged"] = len(_purge_package_modules())
         _rebind_module_level_imports()
@@ -1267,10 +1325,15 @@ def adjust(ContextInfo, _source="timer"):
     _record_adjust_tick()
     _record_adjust_source(_source)
     config = _build_config()
-    if _reload_request["pending"]:
+    _adjust_phase("drain", _drain_rpc_service, config)
+    # AFTER the drain, and not on the tick that scheduled it. The drain is what
+    # flushes queued RPC responses, and reset_app() tears the transport down
+    # with any reply still in it -- reloading first killed the reply to
+    # reload_deployment itself, which the server had already logged as
+    # "responded ok=True" while the client sat there until it timed out.
+    if _reload_request["pending"] and time.time() >= _reload_request["not_before"]:
         _adjust_phase("reload", _perform_reload, ContextInfo)
         return None
-    _adjust_phase("drain", _drain_rpc_service, config)
     _adjust_phase("full_tick", _refresh_full_tick_cache, ContextInfo, config)
     _adjust_phase("download", _pump_download_jobs, ContextInfo, config)
     try:

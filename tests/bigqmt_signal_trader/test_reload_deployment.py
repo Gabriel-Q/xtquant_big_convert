@@ -200,23 +200,55 @@ class RpcSurfaceTest(unittest.TestCase):
 
 
 class AdjustHookTest(unittest.TestCase):
-    def test_adjust_performs_a_pending_reload_first(self):
+    """The reload runs after the drain, and never on the scheduling tick.
+
+    Getting this backwards is not a small bug. The drain is what flushes queued
+    RPC responses, and reset_app() tears the transport down with anything still
+    in it. Reloading first destroyed the reply to reload_deployment itself: the
+    terminal logged "responded method=reload_deployment ok=True" and
+    "[bigqmt_reload] ok purged=28 0.3.7 -> 0.3.7 in 0.99s" -- the reload
+    genuinely worked -- while the client sat there until it timed out, with no
+    way to tell that from a reload that had killed the bridge.
+    """
+
+    def setUp(self):
         import inspect
 
-        source = inspect.getsource(strategy.adjust)
+        self.source = inspect.getsource(strategy.adjust)
 
-        self.assertIn('_reload_request["pending"]', source)
-        self.assertIn('_adjust_phase("reload", _perform_reload, ContextInfo)',
-                      source)
+    def test_the_drain_comes_first(self):
+        drain = self.source.index('_adjust_phase("drain"')
+        reload_at = self.source.index('_adjust_phase("reload"')
 
-    def test_the_tick_returns_after_reloading_rather_than_using_stale_state(self):
-        import inspect
+        self.assertLess(drain, reload_at)
 
-        source = inspect.getsource(strategy.adjust)
-        after = source.split('_adjust_phase("reload"', 1)[1]
+    def test_it_waits_for_the_grace_period(self):
+        self.assertIn('time.time() >= _reload_request["not_before"]', self.source)
 
-        self.assertTrue(after.lstrip().startswith(", _perform_reload, ContextInfo)"))
-        self.assertIn("return None", after.split("\n")[1])
+    def test_the_tick_returns_rather_than_running_on_rebuilt_state(self):
+        after = self.source.split(
+            '_adjust_phase("reload", _perform_reload, ContextInfo)', 1)[1]
+
+        self.assertEqual(after.splitlines()[1].strip(), "return None")
+
+    def test_scheduling_sets_a_deadline_in_the_future(self):
+        import time as _time
+
+        strategy._reload_request.update({"pending": False, "not_before": 0.0})
+        try:
+            before = _time.time()
+
+            strategy.request_reload()
+
+            self.assertGreater(strategy._reload_request["not_before"], before)
+        finally:
+            strategy._reload_request.update({"pending": False, "requested_at": 0.0,
+                                             "not_before": 0.0, "by": ""})
+
+    def test_the_grace_period_is_a_few_ticks_not_a_long_wait(self):
+        """Ticks are ~100ms; this should be a handful of them."""
+        self.assertGreaterEqual(strategy._RELOAD_GRACE_SECONDS, 0.2)
+        self.assertLessEqual(strategy._RELOAD_GRACE_SECONDS, 3.0)
 
 
 class OutcomeTest(RestoresImports, unittest.TestCase):
@@ -276,6 +308,98 @@ class OutcomeTest(RestoresImports, unittest.TestCase):
 
         self.assertEqual(result["version_before"], result["version_after"])
         self.assertTrue(result["version_after"])
+
+
+class FlushBeforeTeardownTest(unittest.TestCase):
+    """The reply has to be on the wire before reset_app() takes the socket.
+
+    Two live attempts both showed the terminal logging "responded
+    method=reload_deployment ok=True" and "[bigqmt_reload] ok purged=28" while
+    the client raised TransportTimeout. The reply was sitting on the ZMQ
+    transport's response queue: the ROUTER thread sends it at the TOP of its
+    next loop, and that loop blocks in recv_multipart for up to RCVTIMEO (1s)
+    and needs the GIL the adjust thread is holding.
+
+    From the client, "reloaded fine but the reply was lost" and "the reload
+    killed the bridge" look identical. That is the failure to design out.
+    """
+
+    class Transport(object):
+        def __init__(self, sizes):
+            self._response_queue = self.Queue(sizes)
+
+        class Queue(object):
+            def __init__(self, sizes):
+                self.sizes = list(sizes)
+
+            def qsize(self):
+                return self.sizes.pop(0) if self.sizes else 0
+
+    class Service(object):
+        def __init__(self, transport):
+            self._transport = transport
+
+    def setUp(self):
+        self.real_service = strategy._rpc_service
+
+    def tearDown(self):
+        strategy._rpc_service = self.real_service
+
+    def _with_queue(self, sizes):
+        strategy._rpc_service = self.Service(self.Transport(sizes))
+
+    def test_it_waits_until_the_queue_empties(self):
+        self._with_queue([2, 1, 0])
+
+        self.assertTrue(strategy._wait_for_responses_to_flush(timeout_seconds=3.0))
+
+    def test_an_empty_queue_returns_at_once(self):
+        self._with_queue([0])
+
+        self.assertTrue(strategy._wait_for_responses_to_flush(timeout_seconds=3.0))
+
+    def test_a_queue_that_never_drains_gives_up_rather_than_hanging(self):
+        """Blocking the adjust thread forever would be worse than a lost
+        reply."""
+        strategy._rpc_service = self.Service(self.Transport([]))
+        strategy._rpc_service._transport._response_queue.qsize = lambda: 3
+
+        self.assertFalse(strategy._wait_for_responses_to_flush(timeout_seconds=0.3))
+
+    def test_no_transport_is_not_an_error(self):
+        """redis deployments have no response queue of their own."""
+        strategy._rpc_service = None
+
+        self.assertEqual(strategy._pending_response_count(), 0)
+        self.assertTrue(strategy._wait_for_responses_to_flush(timeout_seconds=1.0))
+
+    def test_a_transport_without_a_queue_is_not_an_error(self):
+        strategy._rpc_service = self.Service(object())
+
+        self.assertEqual(strategy._pending_response_count(), 0)
+
+    def test_a_raising_qsize_is_not_an_error(self):
+        strategy._rpc_service = self.Service(self.Transport([]))
+
+        def angry():
+            raise RuntimeError("closed")
+
+        strategy._rpc_service._transport._response_queue.qsize = angry
+
+        self.assertEqual(strategy._pending_response_count(), 0)
+
+    def test_the_reload_flushes_before_it_resets(self):
+        import inspect
+
+        source = inspect.getsource(strategy._perform_reload)
+        flush = source.index("_wait_for_responses_to_flush")
+        reset = source.index("reset_app()")
+
+        self.assertLess(flush, reset)
+
+    def test_the_grace_period_outlasts_the_router_recv_timeout(self):
+        """RCVTIMEO is 1s; a shorter grace can beat the thread to the send."""
+        self.assertGreater(strategy._RELOAD_GRACE_SECONDS, 1.0)
 
 
 if __name__ == "__main__":
