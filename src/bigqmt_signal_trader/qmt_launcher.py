@@ -378,6 +378,29 @@ def _looks_like_login_window(rect, screen_width, screen_height):
     return width < screen_width * 0.65 and height < screen_height * 0.65
 
 
+def _wait_for_main_window(
+        find_window, get_rect, screen_width, screen_height,
+        timeout_seconds=90.0, poll_interval=1.0):
+    """Wait until the QMT login shell is replaced by the main terminal.
+
+    FormulaServer port 58600 already listens while the login dialog is still
+    open, so a port-only readiness check can report success after the broker
+    has rejected or timed out the login.  Require the visible QMT window to
+    transition to main-window proportions before declaring login complete.
+    """
+    deadline = time.monotonic() + max(float(timeout_seconds), 0.0)
+    while True:
+        handle = find_window()
+        if handle:
+            rect = get_rect(handle)
+            if not _looks_like_login_window(
+                    rect, screen_width, screen_height):
+                return handle
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(max(float(poll_interval), 0.0))
+
+
 def _login_via_window(credentials, window_title_prefix=None, appear_timeout_seconds=90.0):
     """Type credentials into the QMT login dialog.
 
@@ -600,6 +623,18 @@ def _login_via_window(credentials, window_title_prefix=None, appear_timeout_seco
         return
     # 用 Enter 提交而不是点坐标——布局无关（issue #128）。
     _key(win32con.VK_RETURN)
+    if not _wait_for_main_window(
+            _find,
+            win32gui.GetWindowRect,
+            user32.GetSystemMetrics(0),
+            user32.GetSystemMetrics(1),
+            timeout_seconds=appear_timeout_seconds):
+        raise QmtLauncherError(
+            "QMT login did not reach the main window within %.0fs; the login "
+            "dialog may be showing a broker/network/credential error."
+            % appear_timeout_seconds
+        )
+    log.info("QMT login completed; main window detected")
 
 
 def restart_qmt(install_dir, settle_seconds=5.0, **open_kwargs):
