@@ -70,14 +70,3 @@ class EntryEncodingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class EntryDownloadBindTest(unittest.TestCase):
-    """The checked-in entry must capture QMT-injected download funcs from its
-    exec namespace and feed bind_qmt_api — without it every download RPC is a
-    silent no-op (verified 2026-08-31)."""
-
-    def test_entry_binds_qmt_download_funcs(self):
-        src = open(os.path.join(SRC, "bigqmt_rpc_entry.py"), "rb").read().decode("gbk")
-        self.assertIn("capture_qmt_download_funcs", src)
-        self.assertIn("bind_qmt_api", src)

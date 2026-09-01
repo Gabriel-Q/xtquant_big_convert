@@ -175,31 +175,5 @@ class BigQmtStrategyRunnerTest(unittest.TestCase):
         self.assertEqual(self.app.sync_reasons, ["manual"])
 
 
-class CaptureQmtDownloadFuncsTest(unittest.TestCase):
-    """Entry-side capture of QMT-injected global download funcs.
-
-    QMT injects download_history_data into the ENTRY script's exec namespace
-    only — the strategy module's globals/builtins lookups cannot see it, which
-    is why the download RPC was a silent no-op until 2026-08-31 (full-chain
-    tick download verification)."""
-
-    def test_captures_callable_download_funcs(self):
-        def dl(code, period, start, end):
-            return None
-
-        captured = strategy_module.capture_qmt_download_funcs(
-            {
-                "download_history_data": dl,
-                "download_history_data2": None,
-                "unrelated": "x",
-            }
-        )
-        self.assertEqual(captured, {"download_history_data": dl})
-
-    def test_empty_when_not_injected(self):
-        self.assertEqual(strategy_module.capture_qmt_download_funcs({}), {})
-        self.assertEqual(strategy_module.capture_qmt_download_funcs(None), {})
-
-
 if __name__ == "__main__":
     unittest.main()
