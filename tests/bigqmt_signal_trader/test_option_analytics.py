@@ -1,6 +1,8 @@
 """Deterministic IV/Greeks tests; no QMT process or market feed required."""
 
+import ast
 import datetime
+import io
 import math
 import os
 import sys
@@ -330,6 +332,39 @@ class ContractAnalyticsTest(unittest.TestCase):
             item["dividend_yield_source"] == "put_call_parity_strike"
             for item in result["contracts"]
         ))
+
+
+class ClientOnlyImportBoundaryTest(unittest.TestCase):
+    def test_qmt_server_modules_do_not_import_option_analytics(self):
+        """Keep local models out of the QMT strategy/runtime import graph."""
+        src = os.path.join(ROOT, "src")
+        client_only = {
+            os.path.join("bigqmt_signal_trader", "__init__.py"),
+            os.path.join("bigqmt_signal_trader", "xtquant_compat.py"),
+            os.path.join("bigqmt_signal_trader", "option_analytics.py"),
+            os.path.join("bigqmt_signal_trader", "option_analytics_client.py"),
+        }
+        offenders = []
+        for directory, _subdirs, filenames in os.walk(src):
+            for filename in filenames:
+                if not filename.endswith(".py"):
+                    continue
+                path = os.path.join(directory, filename)
+                relative = os.path.relpath(path, src)
+                if relative in client_only or "xtquant" in relative.split(os.sep):
+                    continue
+                with io.open(path, encoding="utf-8") as handle:
+                    tree = ast.parse(handle.read())
+                for node in ast.walk(tree):
+                    module = ""
+                    if isinstance(node, ast.ImportFrom):
+                        module = node.module or ""
+                    elif isinstance(node, ast.Import):
+                        module = ",".join(alias.name for alias in node.names)
+                    if "option_analytics" in module:
+                        offenders.append(relative)
+
+        self.assertEqual(offenders, [])
 
 
 if __name__ == "__main__":
