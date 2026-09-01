@@ -358,6 +358,26 @@ def open_qmt(install_dir, mode="auto", bat_path=None, exe_name=None,
     return wait_until_ready(ready_port, timeout_seconds=ready_timeout_seconds)
 
 
+def _looks_like_login_window(rect, screen_width, screen_height):
+    """Return whether a QMT top-level window has login-dialog proportions.
+
+    Absolute pixel cut-offs are not stable on Windows: the exact same 国金
+    login window is reported as 832x591 to a DPI-virtualised process and
+    1248x886 after a library makes the process DPI-aware (150% scaling).  The
+    full terminal is normally maximised or close to the work-area size, while
+    the login shell occupies roughly half the screen in both coordinate
+    systems.  Ratios therefore survive DPI scaling and broker UI revisions.
+    """
+    try:
+        width = max(int(rect[2]) - int(rect[0]), 0)
+        height = max(int(rect[3]) - int(rect[1]), 0)
+        screen_width = max(int(screen_width), 1)
+        screen_height = max(int(screen_height), 1)
+    except (TypeError, ValueError, IndexError):
+        return False
+    return width < screen_width * 0.65 and height < screen_height * 0.65
+
+
 def _login_via_window(credentials, window_title_prefix=None, appear_timeout_seconds=90.0):
     """Type credentials into the QMT login dialog.
 
@@ -393,6 +413,15 @@ def _login_via_window(credentials, window_title_prefix=None, appear_timeout_seco
     import ctypes
 
     user32 = ctypes.windll.user32
+    # pyautogui enables DPI awareness when imported.  If we measure the QMT
+    # window first and import pyautogui later, GetWindowRect returns logical
+    # coordinates while SetCursorPos consumes physical coordinates: at 150%
+    # scaling a safe account-field click lands hundreds of pixels away.  Make
+    # the coordinate system physical before the first window enumeration.
+    try:
+        user32.SetProcessDPIAware()
+    except Exception:
+        pass
     prefix = str(window_title_prefix or "QMT")
 
     def _collect(hwnd, acc):
@@ -416,7 +445,8 @@ def _login_via_window(credentials, window_title_prefix=None, appear_timeout_seco
         candidate = _find()
         if candidate:
             r = win32gui.GetWindowRect(candidate)
-            if (r[2] - r[0]) < 800 and (r[3] - r[1]) < 600:
+            if _looks_like_login_window(
+                    r, user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)):
                 handle = candidate
                 break
             # 大窗 = 主界面已出现：终端自动登录了，无需输入凭据，直接跳过。
@@ -446,10 +476,12 @@ def _login_via_window(credentials, window_title_prefix=None, appear_timeout_seco
             "proceeding with topmost + verified clicks anyway")
 
     def _looks_like_login_dialog():
-        # 登录框是小窗（国金 2.1.19 为 ~624x443）；主界面是大窗/最大化。
+        # 登录框约占屏幕一半；主界面是大窗/最大化。不要用固定像素阈值：
+        # 150% DPI 下同一登录框可分别报告成 832x591 或 1248x886。
         # 自动登录完成时找到的会是主界面——打字会落进主窗口控件，必须跳过。
         r = win32gui.GetWindowRect(handle)
-        return (r[2] - r[0]) < 800 and (r[3] - r[1]) < 600
+        return _looks_like_login_window(
+            r, user32.GetSystemMetrics(0), user32.GetSystemMetrics(1))
 
     if not _looks_like_login_dialog():
         log.info("window is already the main interface (auto-login); skipping credentials")
