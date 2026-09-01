@@ -225,49 +225,33 @@ class IdentityClientWiringTest(unittest.TestCase):
 
         self.assertIsNone(handlers._identity_redis())
 
-    def test_the_strategy_builds_one_when_redis_is_configured(self):
+    def test_the_strategy_reuses_its_cached_exec_event_client(self):
+        """Not a second builder of its own.
+
+        _exec_event_redis already exists for exactly this case -- "the RPC
+        service has none, which is the zmq-transport case" -- and it caches.
+        Its docstring records why: a fresh client per call leaked a connection
+        pool per event, and redis-py's __del__ then raised an AttributeError
+        that Python swallows as "Exception ignored in", visible only in the QMT
+        panel.
+        """
         import bigqmt_signal_trader_strategy as strategy
+        import inspect
 
-        built = []
+        source = inspect.getsource(strategy._build_rpc_service)
 
-        class Module(object):
-            @staticmethod
-            def build_redis_client(config):
-                built.append(config)
-                return "client"
-
-        real = strategy._load_bridge_module
-        try:
-            strategy._load_bridge_module = lambda name: Module
-            made = strategy._build_identity_redis_client(
-                {"redis": {"host": "127.0.0.1", "port": 6379}})
-        finally:
-            strategy._load_bridge_module = real
-
-        self.assertEqual(made, "client")
-        self.assertEqual(built, [{"host": "127.0.0.1", "port": 6379}])
+        self.assertIn("order_identity_redis_client", source)
+        self.assertIn("_exec_event_redis(config)", source)
 
     def test_no_redis_config_means_no_client(self):
         import bigqmt_signal_trader_strategy as strategy
 
-        self.assertIsNone(strategy._build_identity_redis_client({}))
-        self.assertIsNone(strategy._build_identity_redis_client({"redis": {}}))
-
-    def test_a_failure_to_build_does_not_take_init_down(self):
-        """Attribution is a nicety; a strategy that will not start is not."""
-        import bigqmt_signal_trader_strategy as strategy
-
-        def explode(name):
-            raise RuntimeError("no redis module")
-
-        real = strategy._load_bridge_module
+        strategy._exec_event_redis_client = None
         try:
-            strategy._load_bridge_module = explode
-            made = strategy._build_identity_redis_client({"redis": {"host": "h"}})
+            self.assertIsNone(strategy._exec_event_redis({}))
+            self.assertIsNone(strategy._exec_event_redis({"redis": {}}))
         finally:
-            strategy._load_bridge_module = real
-
-        self.assertIsNone(made)
+            strategy._exec_event_redis_client = None
 
 
 class AttributionTest(unittest.TestCase):
