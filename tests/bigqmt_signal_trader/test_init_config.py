@@ -21,6 +21,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
 from bigqmt_signal_trader import init_config
+from bigqmt_signal_trader.transports.zmq_transport import _default_zmq_address
 
 
 class _Script(object):
@@ -116,6 +117,19 @@ class RenderedConfigTest(unittest.TestCase):
 
         address = loaded["BIGQMT_REDIS_CONFIG"]["zmq"]["connect_address"]
         self.assertTrue(address.startswith("tcp://192.168.1.9:"), address)
+
+    def test_zmq_client_address_matches_the_server_transport_default(self):
+        """The generated client must dial the endpoint ZmqTransport binds."""
+        for account_id in ("8886800503", "account-without-digits"):
+            loaded = _load(init_config.render_client_config(
+                _answers(account_id=account_id, transport="zmq",
+                         host="192.168.1.9")), "c.py")
+
+            address = loaded["BIGQMT_REDIS_CONFIG"]["zmq"]["connect_address"]
+            self.assertEqual(
+                address,
+                _default_zmq_address(account_id, host="192.168.1.9"),
+            )
 
     def test_credentials_survive_characters_that_would_break_naive_quoting(self):
         nasty = "a'b\"c\\d#e"

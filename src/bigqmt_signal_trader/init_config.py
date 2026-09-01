@@ -71,10 +71,12 @@ def _zmq_default_port(account_id):
     """The zmq transport derives its port from the account id when no explicit
     address is configured; mirror that so the client block points somewhere
     real instead of a placeholder."""
-    digits = "".join(character for character in str(account_id) if character.isdigit())
-    if not digits:
-        return 15563
-    return 15000 + (int(digits) % 1000)
+    # Keep one source of truth for the derivation.  Duplicating the constants
+    # here previously made bigqmt-init generate a client address in the 15000
+    # range while the QMT-side ZmqTransport listened in the 15560 range.
+    from .transports.zmq_transport import _default_zmq_port
+
+    return _default_zmq_port(account_id)
 
 
 def render_server_config(answers):
