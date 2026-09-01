@@ -1726,24 +1726,41 @@ class BigQmtXtData:
         except Exception:
             pass
 
+    @staticmethod
+    def _served_codes(data):
+        """Codes the server actually served, across both return shapes:
+        get_market_data_ex is code-keyed ({code: DataFrame}), get_market_data
+        is field-keyed ({field: {code: [..]}}) -- reading keys off the wrong
+        level would make every code look missing."""
+        if not isinstance(data, dict):
+            return set()
+        nested = {code for value in data.values() if isinstance(value, dict) for code in value}
+        return nested if nested else set(data.keys())
+
     def _heal_adjusted(self, method, params, data, wait_seconds=2.0, timeout_seconds=None):
         """Self-heal reads served from an unready raw store: if the adjusted
         pull came back all-zero, or a none-adjusted pull came back missing
-        requested codes, trigger a server-side raw download, wait for async
-        landing, retry once."""
+        most requested codes, trigger a server-side raw download, wait for
+        async landing, retry once."""
         dividend_type = str(params.get("dividend_type") or "none").lower()
         codes = list(params.get("stock_list") or params.get("stock_code") or [])
         if not codes:
             return data
         if dividend_type in ("", "none"):
             # None-adjusted bars are never zero-filled, so the all-zero
-            # detector does not apply -- but a *missing* code means the server
+            # detector does not apply -- a *missing* code means the server
             # has no raw bars for it at all. Big QMT's raw store is not
             # auto-populated market-wide (a --tick pipeline read 8 of 5225
             # codes on 2026-08-30 because nothing ever downloaded the raw
-            # dailies), so heal that the same way.
-            returned = data.keys() if isinstance(data, dict) else []
-            if all(code in returned for code in codes):
+            # dailies), so heal that the same way. But a full-market read
+            # always has a few codes the server can never serve (delisted,
+            # suspended, no quote permission), and healing on *any* missing
+            # code made those a per-call cost -- raw download + sleep + full
+            # re-read, every time. Heal only when the majority came back
+            # missing: that is the raw-store-not-populated signal.
+            served = self._served_codes(data)
+            missing = sum(1 for code in codes if code not in served)
+            if missing < max(1, len(codes) // 2):
                 return data
         elif not self._is_all_zero_any(data):
             return data

@@ -666,6 +666,47 @@ class _MissingThenCompleteClient(FakeClient):
         raise AssertionError("unexpected rpc: %s" % method)
 
 
+class _NeverServesAllClient(FakeClient):
+    """none-adjusted get_market_data_ex that permanently omits some codes
+    (delisted / suspended / no quote permission): the server can never serve
+    them, no matter how often the raw store is downloaded."""
+
+    def __init__(self, cache_dir, unserved):
+        super(_NeverServesAllClient, self).__init__(cache_dir)
+        self._unserved = set(unserved)
+
+    def call(self, method, params=None, account_id=None, timeout_seconds=None):
+        self.calls.append(method)
+        self.call_params.append((method, params))
+        self.call_timeouts.append((method, timeout_seconds))
+        import pandas as pd
+
+        if method == "download_history_data2":
+            return True
+        if method == "get_market_data_ex":
+            codes = (params or {}).get("stock_list") or []
+            served = [c for c in codes if c not in self._unserved]
+            return {c: pd.DataFrame({"stime": ["20260626", "20260629"], "close": [8.76, 8.73]}) for c in served}
+        raise AssertionError("unexpected rpc: %s" % method)
+
+
+class _FieldKeyedClient(FakeClient):
+    """get_market_data answers field-keyed ({field: {code: [..]}}), the QMT
+    ContextInfo shape -- served codes live one level below the top keys."""
+
+    def call(self, method, params=None, account_id=None, timeout_seconds=None):
+        self.calls.append(method)
+        self.call_params.append((method, params))
+        self.call_timeouts.append((method, timeout_seconds))
+
+        if method == "download_history_data2":
+            return True
+        if method == "get_market_data":
+            codes = (params or {}).get("stock_list") or []
+            return {"close": {c: [8.76, 8.73] for c in codes}}
+        raise AssertionError("unexpected rpc: %s" % method)
+
+
 class AdjustedReadSelfHealTest(unittest.TestCase):
     """Reading adjusted bars that come back all-zero must self-heal:
     trigger a server-side raw download, wait, and retry once."""
@@ -722,6 +763,57 @@ class AdjustedReadSelfHealTest(unittest.TestCase):
         self.assertIn("download_history_data2", method_calls)
         # get_market_data_ex called twice: initial partial pull + retry.
         self.assertEqual(method_calls.count("get_market_data_ex"), 2)
+
+    def test_none_read_majority_missing_self_heals(self):
+        # The steady 2026-08-30 shape (5225 requested, 8 served ~ 0.15%):
+        # majority missing is the raw-store-not-populated signal and must
+        # still heal once the criterion stops being "any code missing".
+        xt = self._xt_missing()
+        codes = ["60000%d.SH" % i for i in range(10)]
+        data = xt.get_market_data_ex(
+            field_list=["close"], stock_list=codes, period="1d",
+            dividend_type="none",
+        )
+        self.assertEqual(sorted(data.keys()), sorted(codes))
+        method_calls = [m for m, _ in xt.client.call_params]
+        self.assertIn("download_history_data2", method_calls)
+        self.assertEqual(method_calls.count("get_market_data_ex"), 2)
+
+    def test_none_read_minority_missing_does_not_self_heal(self):
+        # A full-market read always has a few codes the server can never
+        # serve (delisted / suspended / no quote permission). Healing on
+        # any missing code made each of those a per-call cost -- raw
+        # download + sleep + full re-read, every time. A minority missing
+        # must return the partial result as-is, single pull.
+        from bigqmt_signal_trader.xtquant_compat import BigQmtXtData
+
+        xt = BigQmtXtData(_NeverServesAllClient(self.dir, unserved=["000001.SZ"]))
+        data = xt.get_market_data_ex(
+            field_list=["close"],
+            stock_list=["600000.SH", "000001.SZ", "600519.SH", "000002.SZ"],
+            period="1d", dividend_type="none",
+        )
+        self.assertEqual(sorted(data.keys()), ["000002.SZ", "600000.SH", "600519.SH"])
+        method_calls = [m for m, _ in xt.client.call_params]
+        self.assertNotIn("download_history_data2", method_calls)
+        self.assertEqual(method_calls.count("get_market_data_ex"), 1)
+
+    def test_field_keyed_get_market_data_none_does_not_self_heal(self):
+        # get_market_data answers field-keyed ({field: {code: [..]}});
+        # reading served codes off the top level would make every code look
+        # missing and pay the heal (download + sleep + re-read) on every
+        # none-adjusted call even when the result is complete.
+        from bigqmt_signal_trader.xtquant_compat import BigQmtXtData
+
+        xt = BigQmtXtData(_FieldKeyedClient(self.dir))
+        data = xt.get_market_data(
+            field_list=["close"], stock_list=["600000.SH", "000001.SZ"], period="1d",
+            dividend_type="none",
+        )
+        self.assertEqual(sorted(data["close"].keys()), ["000001.SZ", "600000.SH"])
+        method_calls = [m for m, _ in xt.client.call_params]
+        self.assertNotIn("download_history_data2", method_calls)
+        self.assertEqual(method_calls.count("get_market_data"), 1)
 
     def test_none_read_does_not_self_heal(self):
         xt = self._xt()
