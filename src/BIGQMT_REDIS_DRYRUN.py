@@ -339,6 +339,24 @@ try:
         get_trade_detail_data_func=globals().get("get_trade_detail_data"),
         extra_funcs=qmt_extra or None,
     )
+    # QMT injects passorder / get_trade_detail_data / download_history_data
+    # into a file it runs AS A STRATEGY. When none of them are here the file is
+    # being exec'd as a plain script: the module body runs, init() is never
+    # called, no RPC service starts, and the run simply ends -- which from the
+    # log looks like a successful start followed by "finished" (issue #123).
+    # ASCII only: this file declares #coding:gbk and is stored as UTF-8, so it
+    # holds together only while every byte is ASCII.
+    if not any(name in globals() for name in
+               ("passorder", "get_trade_detail_data", "download_history_data")):
+        print("[bigqmt_shell] WARNING: QMT injected none of its API globals "
+              "(passorder / get_trade_detail_data / download_history_data), so "
+              "this file is running as a plain script rather than as a "
+              "strategy. init() will never be called, the RPC service will not "
+              "start, and the run ends here with nothing listening. Two known "
+              "causes: running it from the strategy EDITOR window instead of "
+              "adding it under model trading, and the 'standalone python "
+              "process' option, which makes QMT exec the file as __main__ "
+              "without calling init(). See issue #123.")
 except NameError:
     pass
 
