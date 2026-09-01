@@ -374,6 +374,35 @@ def _account_type_name(value):
     return text.upper()
 
 
+def _account_type_code(value):
+    """The xtconstant NUMBER for an account type, whatever form it arrives in.
+
+    The mirror of _account_type_name. XtOrder / XtTrade / XtPosition all carry
+    account_type as an int (xttype sets it to SECURITY_ACCOUNT), so a name has
+    to come back as a number before it reaches a caller. 0 means "nothing to
+    go on" -- the caller decides what to fall back to.
+    """
+    text = str("" if value is None else value).strip()
+    if not text:
+        return 0
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        pass
+    try:
+        from xtquant.xtconstant import ACCOUNT_TYPE_DICT, SECURITY_ACCOUNT
+
+        upper = text.upper()
+        if upper == "SECURITY":
+            return int(SECURITY_ACCOUNT)
+        for code, name in ACCOUNT_TYPE_DICT.items():
+            if str(name).strip().upper() == upper:
+                return int(code)
+    except Exception:
+        pass
+    return 0
+
+
 def _restore_jsonable(value):
     if isinstance(value, dict):
         marker = value.get("__bigqmt_type__")
@@ -2816,7 +2845,9 @@ class BigQmtXtTrader:
         if market_value is None:
             market_value = price * volume
         return CompatObject(
-            account_type=2,
+            # 以前硬编码 2（SECURITY_ACCOUNT），信用账户上就是错的 —— 和 #103
+            # 报的 on_account_status 同一类。现在跟服务端说的走。
+            account_type=self._account_type_value(item),
             account_id=account_id,
             stock_code=stock_code,
             stock_name=stock_name,
@@ -3041,6 +3072,24 @@ class BigQmtXtTrader:
             account_id=account_id,
         ) or []
         return [self._trade_from_dict(account_id, item) for item in _as_list(data)]
+
+    def describe_trade_detail_fields(self, account, detail_types=None):
+        """Which attributes QMT's own ORDER / DEAL rows carry. Names only.
+
+        A debugging aid, not part of MiniQMT: when a field comes back empty,
+        this says whether the terminal is not providing it or the bridge is
+        not forwarding it. Those two look identical from the client and have
+        cost a deploy-and-restart each time (#113, #130, #133).
+
+            xt_trader.describe_trade_detail_fields(account)
+            -> {'ORDER': {'rows': 15, 'attributes': [...], 'error': ''}, ...}
+        """
+        account_id = _account_id(account, self.client.account_id)
+        params = {"account_id": account_id}
+        if detail_types:
+            params["detail_types"] = list(detail_types)
+        return self.client.call("describe_trade_detail_fields", params,
+                                account_id=account_id) or {}
 
     def query_execution_snapshot(
         self,
@@ -3861,6 +3910,28 @@ class BigQmtXtTrader:
         # 语义：seq 为 -1 表示委托失败）。
         return -1
 
+    def _account_type_value(self, item=None):
+        """account_type for an XtOrder / XtTrade / XtPosition, as an int.
+
+        Server first (it is the one that knows what this deployment trades
+        as -- #103), then what the caller declared, then SECURITY_ACCOUNT so
+        the field is never absent. Positions used to hardcode 2 and orders and
+        trades did not carry it at all (#133).
+        """
+        code = _account_type_code((item or {}).get("account_type"))
+        if code:
+            return code
+        code = _account_type_code(self._server_account_type
+                                 or self._declared_account_type)
+        if code:
+            return code
+        try:
+            from xtquant.xtconstant import SECURITY_ACCOUNT
+
+            return int(SECURITY_ACCOUNT)
+        except Exception:
+            return 2
+
     def _order_from_dict(self, account_id, item):
         action = item.get("action")
         order_type = _action_to_order_type(action)
@@ -3890,6 +3961,14 @@ class BigQmtXtTrader:
             # MiniQMT XtOrder.status_msg —— 废单时柜台给的原因 (issue #60)。
             status_msg=str(item.get("status_msg") or ""),
             price_type=item.get("price_type"),
+            # xttype.XtOrder 契约里有、以前没发的字段 (issue #133)。旧部署不发
+            # 这些键，所以每个都要能在缺失时给出 MiniQMT 语义的默认值，而不是
+            # 让调用方撞 AttributeError —— 那正是这个 issue 报的现象。
+            account_type=self._account_type_value(item),
+            instrument_name=str(item.get("instrument_name") or ""),
+            secu_account=str(item.get("secu_account") or ""),
+            offset_flag=item.get("offset_flag"),
+            direction=item.get("direction"),
         )
 
     def _trade_from_dict(self, account_id, item):
@@ -3923,6 +4002,13 @@ class BigQmtXtTrader:
             traded_at=str(item.get("traded_at") or ""),
             strategy_name=str(item.get("strategy_name") or ""),
             order_remark=str(item.get("user_order_id") or item.get("remark") or ""),
+            # 同 _order_from_dict：xttype.XtTrade 契约里有而以前没发的 (issue #133)。
+            account_type=self._account_type_value(item),
+            instrument_name=str(item.get("instrument_name") or ""),
+            secu_account=str(item.get("secu_account") or ""),
+            commission=_safe_float(item.get("commission"), 0.0),
+            offset_flag=item.get("offset_flag"),
+            direction=item.get("direction"),
         )
 
 

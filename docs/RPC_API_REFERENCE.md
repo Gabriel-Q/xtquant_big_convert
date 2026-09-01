@@ -14,7 +14,7 @@
 | 系统 | 1 | `ping` |
 | 行情快照 | 2 | `get_ticks` / `get_instrument` |
 | 行情/K线/基本面（转发适配器）| 84 | 见下表 |
-| 账户/持仓/委托 | 5 | `get_asset` / `get_positions` / `query_stock_position` / `query_orders` / `query_trades` |
+| 账户/持仓/委托 | 6 | `get_asset` / `get_positions` / `query_stock_position` / `query_orders` / `query_trades` / `describe_trade_detail_fields` |
 | 交易扩展查询（官方函数）| 13 | `get_value_by_order_id` / `get_last_order_id` / `get_ipo_data` / `get_new_purchase_limit` / `get_history_trade_detail_data` / 融资融券5个 / 期权持仓2个 / 港股通汇率 |
 | 持仓同步 | 1 | `sync_positions` |
 | 下单/撤单 | 2 | `submit_order` / `cancel_order`（默认关闭）|
@@ -269,6 +269,19 @@
 - **参数**：`account_id`(可选) `strategy_name`(str, 默认 `""` 返回全部)
 - **返回**：成交明细 `list`。
 - **strategy_name 陷阱**：同 `query_orders`，默认 `""` 返回全部成交。
+- **strategy_name 取值**（issue #133）：优先取 DEAL 行自己的 `m_strStrategyName`，
+  取不到才回填查询过滤参数。以前只有后一半，所以不过滤查全部（默认）时
+  这个字段恒为空字符串。
+
+### `describe_trade_detail_fields`
+- **参数**：`account_id`(可选) `detail_types`(list, 默认 `["ORDER", "DEAL"]`)
+- **返回**：`{"ORDER": {"rows": n, "attributes": [...], "error": ""}, "DEAL": {...}}`
+- **用途**：诊断工具，不属于 MiniQMT 接口。某个字段为空时，它回答“是终端没给，
+  还是桥没转发”—— 这两种从客户端看完全一样，而每次分辨都要一次
+  部署 + 重启（#113、#130、#133）。
+- **只返回属性名，不返回值**：委托/成交行里有价格、数量、柜台编号，
+  而这条 RPC 和其他一样走公共通道。
+- **客户端**：`xt_trader.describe_trade_detail_fields(account)`
 
 ---
 

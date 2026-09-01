@@ -70,6 +70,7 @@ READ_METHODS = {
     "query_orders",
     "query_trades",
     "query_execution_snapshot",
+    "describe_trade_detail_fields",
     "query_stock_position",
     "sync_positions",
     "submit_download_history_data",
@@ -132,6 +133,7 @@ LISTENER_DEFERRED_METHODS = {
     "query_stock_position",
     "query_orders",
     "query_trades",
+    "describe_trade_detail_fields",
     "query_account_infos",
     "query_account_status",
     "query_credit_detail",
@@ -824,6 +826,26 @@ class BigQmtRpcHandlers:
             self._request_account_id(params),
             str(strategy_name),
         )
+
+    def _handle_describe_trade_detail_fields(self, params):
+        """Report which attributes QMT's ORDER / DEAL rows carry. Names only.
+
+        Answers "why is field X empty / missing" without another
+        deploy-and-restart round trip -- see BigQmtOrderGateway
+        .describe_detail_fields. Deferred to the main thread with the other
+        trade-context queries: get_trade_detail_data returns EMPTY off it.
+        """
+        if self.order_gateway is None:
+            raise RuntimeError("order_gateway is not configured")
+        describe = getattr(self.order_gateway, "describe_detail_fields", None)
+        if describe is None:
+            raise RuntimeError(
+                "this deployment predates describe_trade_detail_fields; "
+                "sync and restart the strategy")
+        detail_types = params.get("detail_types") or params.get("detail_type")
+        if isinstance(detail_types, str):
+            detail_types = [detail_types]
+        return describe(self._request_account_id(params), detail_types)
 
     def _handle_query_execution_snapshot(self, params):
         if self.order_gateway is None:

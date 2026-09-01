@@ -37,6 +37,38 @@ PRICE_TYPE_ALIASES = {
 # why they passed while the mapping was wrong.
 _XC = _xtconstant
 
+# Name -> xtconstant code, built FROM xtconstant rather than written out: PR #88
+# is the standing reminder of what happens when these are typed as literals.
+# "SECURITY" is an alias because xtconstant spells the constant
+# SECURITY_ACCOUNT while ACCOUNT_TYPE_DICT names it "STOCK".
+ACCOUNT_TYPE_CODES = dict(
+    (str(name).strip().upper(), int(code))
+    for code, name in _xtconstant.ACCOUNT_TYPE_DICT.items()
+)
+ACCOUNT_TYPE_CODES["SECURITY"] = _XC.SECURITY_ACCOUNT
+
+
+def _data_attribute_names(row):
+    """Public non-callable attribute names on a QMT row object.
+
+    dir() alone lists methods too. Reading each one to check is safe -- the
+    values are discarded -- but a property can raise, so each getattr is
+    guarded rather than assumed.
+    """
+    names = []
+    for name in dir(row):
+        if name.startswith("_"):
+            continue
+        try:
+            value = getattr(row, name)
+        except Exception:
+            continue
+        if not callable(value):
+            names.append(name)
+    return sorted(names)
+
+
+
 CREDIT_OPTYPE_BY_ORDER_TYPE = {
     _XC.CREDIT_FIN_BUY: 27,                    # 融资买入
     _XC.CREDIT_SLO_SELL: 28,                   # 融券卖出
@@ -223,6 +255,50 @@ class BigQmtOrderGateway:
             raise RuntimeError("cancel is not available in Big QMT runtime")
         return self.cancel_func
 
+    def _account_type_code(self):
+        """The account type as MiniQMT reports it: an xtconstant int.
+
+        xttype.XtOrder/XtTrade both carry account_type, and real MiniQMT fills
+        it with SECURITY_ACCOUNT unconditionally. This deployment knows better
+        -- it is configured with the type it actually trades as -- and #92
+        showed what silence costs: a credit account read as STOCK returns an
+        all-zero asset row with no error. So report the configured type and
+        fall back to SECURITY_ACCOUNT only when there is nothing to report.
+        """
+        text = str(self.account_type or "").strip().upper()
+        if text in ACCOUNT_TYPE_CODES:
+            return ACCOUNT_TYPE_CODES[text]
+        try:
+            # Already a code -- some configs set the number directly.
+            return int(text)
+        except (TypeError, ValueError):
+            return _XC.SECURITY_ACCOUNT
+
+    def _instrument_name(self, row, stock_code, cache):
+        """证券名称 —— from the row if QMT put it there, else ContextInfo.
+
+        Position rows carry m_strInstrumentName (position_bigqmt reads it), so
+        order/deal rows plausibly do too; whether they actually do is a
+        question about the terminal, not about us, hence the fallback. The
+        cache is per query call: get_stock_name is an in-process ContextInfo
+        call, but a day of orders can repeat the same code many times.
+        """
+        name = str(_attr(row, ("m_strInstrumentName", "instrument_name",
+                               "stock_name"), "") or "")
+        if name:
+            return name
+        if stock_code in cache:
+            return cache[stock_code]
+        resolved = ""
+        getter = getattr(self.context_info, "get_stock_name", None)
+        if getter is not None:
+            try:
+                resolved = str(getter(stock_code) or "")
+            except Exception:
+                resolved = ""
+        cache[stock_code] = resolved
+        return resolved
+
     def _require_query_func(self):
         if self.get_trade_detail_data is None:
             raise RuntimeError("get_trade_detail_data is not available in Big QMT runtime")
@@ -288,6 +364,8 @@ class BigQmtOrderGateway:
         query = self._require_query_func()
         rows = query(account_id, self.account_type, "ORDER", strategy_name) or []
         result = []
+        account_type_code = self._account_type_code()
+        name_cache = {}
         for row in rows:
             try:
                 stock_code = _full_code(
@@ -315,6 +393,14 @@ class BigQmtOrderGateway:
                     traded_price=float(
                         _attr(row, ("m_dTradedPrice", "traded_price", "avg_traded_price"), 0.0) or 0.0
                     ),
+                    # MiniQMT XtOrder carries these and this bridge never sent
+                    # them, so every client saw AttributeError (issue #133).
+                    account_type=account_type_code,
+                    instrument_name=self._instrument_name(row, stock_code, name_cache),
+                    secu_account=str(_attr(row, ("m_strShareholderID", "m_strSecuAccount",
+                                                 "secu_account"), "") or ""),
+                    offset_flag=_attr(row, ("m_nOffsetFlag", "offset_flag")),
+                    direction=_attr(row, ("m_nDirection", "direction")),
                 )
             )
         return result
@@ -342,6 +428,8 @@ class BigQmtOrderGateway:
         if not rows and last_error is not None:
             raise last_error
         result = []
+        account_type_code = self._account_type_code()
+        name_cache = {}
         for row in rows:
             traded_at_raw = _attr(row, ("m_strTradeTime", "trade_time", "traded_at"), "")
             try:
@@ -365,14 +453,57 @@ class BigQmtOrderGateway:
                     # 官方 Deal 字段: m_dTradeAmount 成交额; m_strTradeDate+
                     # m_strTradeTime 合成 Unix 秒; 策略名来自查询过滤参数。
                     amount=float(_attr(row, ("m_dTradeAmount", "amount"), 0.0) or 0.0),
-                    strategy_name=str(strategy_name or ""),
+                    # The row's own strategy name first. This used to echo the
+                    # query filter and nothing else, so an unfiltered query --
+                    # the default -- reported "" for every deal no matter what
+                    # the order was submitted under (issue #133). The filter
+                    # stays as the fallback: when one IS given, every row in
+                    # the result belongs to it by construction.
+                    strategy_name=str(
+                        _attr(row, ("m_strStrategyName", "strategy_name"), "")
+                        or strategy_name or ""
+                    ),
                     traded_time=date_time_seconds(
                         _attr(row, ("m_strTradeDate", "trade_date", "m_strDealDate")),
                         traded_at_raw,
                     ),
+                    account_type=account_type_code,
+                    instrument_name=self._instrument_name(row, stock_code, name_cache),
+                    secu_account=str(_attr(row, ("m_strShareholderID", "m_strSecuAccount",
+                                                 "secu_account"), "") or ""),
+                    # XtTrade.commission 手续费. QMT spells it m_dComssion in
+                    # places -- both are tried rather than guessed at.
+                    commission=float(_attr(row, ("m_dComssion", "m_dCommission",
+                                                 "commission"), 0.0) or 0.0),
+                    offset_flag=_attr(row, ("m_nOffsetFlag", "offset_flag")),
+                    direction=_attr(row, ("m_nDirection", "direction")),
                 )
             )
         return result
+
+    def describe_detail_fields(self, account_id, detail_types=None):
+        """Which attributes QMT's own ORDER / DEAL rows actually carry.
+
+        Names only, never values. Three issues so far (#113, #130, #133) have
+        been "field X is missing", and each one cost a deploy-and-restart cycle
+        to answer, because nothing outside QMT can see what
+        get_trade_detail_data hands back. A row carries prices, volumes and
+        counter ids, and this travels the same channel as any other RPC, so
+        the values stay here.
+        """
+        query = self._require_query_func()
+        described = {}
+        for detail_type in (detail_types or ("ORDER", "DEAL")):
+            entry = {"rows": 0, "attributes": [], "error": ""}
+            try:
+                rows = query(account_id, self.account_type, str(detail_type)) or []
+                entry["rows"] = len(rows)
+                if rows:
+                    entry["attributes"] = _data_attribute_names(rows[0])
+            except Exception as exc:
+                entry["error"] = "%s: %s" % (type(exc).__name__, exc)
+            described[str(detail_type)] = entry
+        return described
 
     def query_submission_identities_strict(self, account_id, strategy_name):
         orders = self.query_orders_strict(account_id, strategy_name)
