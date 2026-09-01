@@ -131,18 +131,20 @@ class DownloadWrapperTest(unittest.TestCase):
 
 
 class StockTypeWrapperTest(unittest.TestCase):
-    def setUp(self):
-        self.data = _Recorder()
+    """get_stock_type 是这批里唯一一个不能直接转发的。
 
-    def test_stock_code_is_forwarded_as_the_server_param_name(self):
-        # 服务端是 ContextInfo.get_stock_type(stock)，参数名是 stock 不是 code
-        self.data.get_stock_type("600000.SH")
-        self.assertEqual(self.data.calls, [("get_stock_type", {"stock": "600000.SH"})])
+    实盘验证发现服务端 ContextInfo.get_stock_type 对任何代码都返回 0
+    （股票 / ETF / 债券 / 期权都一样），转发等于把一个假分类递给调用方。
+    详见 test_get_stock_type_unavailable.py。
+    """
 
-    def test_variety_list_is_accepted_but_not_forwarded(self):
-        self.data.get_stock_type("600000.SH", variety_list=["stock"])
-        self.assertEqual(self.data.calls, [("get_stock_type", {"stock": "600000.SH"})])
+    def test_it_refuses_instead_of_forwarding(self):
+        data = _Recorder()
 
+        with self.assertRaises(NotImplementedError):
+            data.get_stock_type("600000.SH")
+
+        self.assertEqual(data.calls, [])
 
 class L2ThousandWrapperTest(unittest.TestCase):
     def setUp(self):

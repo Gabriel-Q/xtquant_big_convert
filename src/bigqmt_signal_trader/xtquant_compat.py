@@ -1373,12 +1373,26 @@ class BigQmtXtData:
         return self._call("get_instrument_type", code=stock_code, variety_list=variety_list)
 
     def get_stock_type(self, stock_code, variety_list=None):
-        """xtdata.get_stock_type 的同名封装。
+        """xtdata.get_stock_type 的同名封装 —— 大 QMT 上答不了，直接报错。
 
-        大 QMT 侧是 ContextInfo.get_stock_type(stock)，参数名是 stock 不是 code。
-        variety_list 服务端不支持，保留形参只为签名一致。
+        服务端走的是 ContextInfo.get_stock_type(stock)。这个 stub 在大 QMT 上
+        存在（缺失会抛 NotImplementedError），但**对任何代码都返回 0**：实测
+        股票 600000.SH、ETF 589820.SH、沪市债券 186511.SH、期权
+        10011096.SHO 全部是 0，换代码格式（600000 / SH600000 /
+        600000.SSE）也一样。
+
+        返回一个恒为 0 的"类型"比报 AttributeError 更糟：报错看得见，一个
+        错的分类看不见。所以这里显式拒绝，并指向真正能用的那个：
+        get_instrument_type()，实测能区分 stock / fund / etf / bond / index。
         """
-        return self._call("get_stock_type", stock=stock_code)
+        raise NotImplementedError(
+            "get_stock_type is not usable on Big QMT: the server-side "
+            "ContextInfo.get_stock_type stub returns 0 for every code "
+            "(verified live against a stock, an ETF, a bond and an option, and "
+            "against every code format). Use get_instrument_type(stock_code) "
+            "instead -- it returns "
+            "{'stock': ..., 'fund': ..., 'etf': ..., 'bond': ..., 'index': ...}."
+        )
 
     def subscribe_l2thousand(self, stock_code, gear_num=None, callback=None):
         """千档盘口订阅。
