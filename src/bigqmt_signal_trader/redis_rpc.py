@@ -1117,6 +1117,16 @@ class BigQmtRpcHandlers:
             raise ValueError(
                 "order_type %s has no implicit buy/sell side; pass action "
                 "explicitly" % raw)
+        # Futures (0-15) and ETF option (50-59) opTypes carry the side in the
+        # type itself. 行权/锁定 (56-59) do not, so they fall through to the
+        # same "pass action explicitly" rejection as 直接还款.
+        passthrough = _passthrough_action_of(raw)
+        if passthrough:
+            return passthrough
+        if _passthrough_optype_of(raw) is not None:
+            raise ValueError(
+                "order_type %s has no implicit buy/sell side; pass action "
+                "explicitly" % raw)
         if raw in (None, ""):
             raise ValueError("action or order_type is required")
         # An order_type WAS supplied and was not recognised. Saying "required"
@@ -1144,10 +1154,24 @@ class BigQmtRpcHandlers:
         except Exception:
             return "unknown version"
 
-    def _credit_order_type_from_params(self, params):
-        """The MiniQMT order_type to forward, when it is a credit operation."""
+    def _forwarded_order_type(self, params):
+        """The order_type to forward untouched to passorder, or None.
+
+        Credit (27-32/40-45/70-75) and futures/option (0-15/50-59) opTypes both
+        encode more than a side, so submit() needs the raw value. Read straight
+        from params -- no state is carried between calls, so this does not
+        depend on the order OrderRequest's keyword arguments happen to be
+        evaluated in.
+        """
         raw = params.get("order_type")
-        return raw if _credit_optype_of(raw) is not None else None
+        if _credit_optype_of(raw) is not None:
+            return raw
+        if _passthrough_optype_of(raw) is not None:
+            return raw
+        return None
+
+    # 旧名保留：外部调用方和既有测试还在用
+    _credit_order_type_from_params = _forwarded_order_type
 
     def _handle_submit_order(self, params):
         if self.order_gateway is None:
@@ -1167,7 +1191,7 @@ class BigQmtRpcHandlers:
             price_type=params.get("price_type") or "LIMIT",
             strategy_name=str(params.get("strategy_name") or "bigqmt_rpc"),
             remark=order_tag,
-            order_type=self._credit_order_type_from_params(params),
+            order_type=self._forwarded_order_type(params),
         )
         if request.action not in ("BUY", "SELL"):
             raise ValueError("action must be BUY or SELL")
@@ -1435,6 +1459,24 @@ def _credit_optype_of(order_type):
         from bigqmt_signal_trader.adapters.order_bigqmt import credit_optype_of
 
         return credit_optype_of(order_type)
+    except Exception:
+        return None
+
+
+def _passthrough_optype_of(order_type):
+    try:
+        from bigqmt_signal_trader.adapters.order_bigqmt import passthrough_optype_of
+
+        return passthrough_optype_of(order_type)
+    except Exception:
+        return None
+
+
+def _passthrough_action_of(order_type):
+    try:
+        from bigqmt_signal_trader.adapters.order_bigqmt import passthrough_action_of
+
+        return passthrough_action_of(order_type)
     except Exception:
         return None
 
