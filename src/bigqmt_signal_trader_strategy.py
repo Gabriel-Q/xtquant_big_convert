@@ -463,15 +463,26 @@ def _build_rpc_service(context_info, app, config):
         order_settle_timeout_seconds=float(rpc_config.get("order_settle_timeout_seconds", 3.0)),
         quote_subscription_manager=quote_manager,
     )
-    handlers.download_job_redis_client = response_redis_client or redis_client
-    # The order-identity store, which is how a query gets a strategy name back
-    # (QMT does not put one on its rows -- issue #133). It must not depend on
-    # the transport: only a redis transport builds the clients above, so a zmq
-    # deployment never remembered an order and could never attribute one.
-    # Built here from the redis config if there is one; absent config it stays
-    # None and attribution is simply skipped.
-    handlers.order_identity_redis_client = (
-        handlers.download_job_redis_client or _exec_event_redis(config))
+    # Neither of these may depend on the TRANSPORT. Only a redis transport
+    # builds the two clients above, so on zmq both were None -- and each had a
+    # working counterpart on the other side of that None:
+    #
+    #   download jobs   _pump_download_jobs advances queued jobs on every
+    #                   adjust tick and takes its client from _exec_event_redis,
+    #                   so on zmq the worker ran while submit / get_status /
+    #                   wait answered "download jobs require a Redis client".
+    #                   The worker was running and the door was locked.
+    #   order identity  orders were never remembered at submit time, so a query
+    #                   could never put the strategy name back (issue #133).
+    #
+    # _exec_event_redis is the helper that already covers this case ("only
+    # builds a client when _rpc_service has none, which is the zmq-transport
+    # case") and caches it -- its docstring says what building one per call
+    # cost. No redis configured at all leaves both None, and both stores treat
+    # that as "feature off", never as an error.
+    _store_redis = response_redis_client or redis_client or _exec_event_redis(config)
+    handlers.download_job_redis_client = _store_redis
+    handlers.order_identity_redis_client = _store_redis
     handlers.download_job_chunk_size = int((config.get("download_jobs") or {}).get("chunk_size") or 10)
     handlers.download_job_ttl_seconds = int((config.get("download_jobs") or {}).get("job_ttl_seconds") or 3600)
     process_in_listener = _config_bool(rpc_config.get("process_in_listener"), True)
