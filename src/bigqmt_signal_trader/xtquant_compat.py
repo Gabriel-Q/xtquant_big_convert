@@ -389,17 +389,32 @@ def _account_type_code(value):
         return int(text)
     except (TypeError, ValueError):
         pass
+    upper = text.upper()
     try:
-        from xtquant.xtconstant import ACCOUNT_TYPE_DICT, SECURITY_ACCOUNT
-
-        upper = text.upper()
-        if upper == "SECURITY":
-            return int(SECURITY_ACCOUNT)
-        for code, name in ACCOUNT_TYPE_DICT.items():
-            if str(name).strip().upper() == upper:
-                return int(code)
+        from xtquant import xtconstant
     except Exception:
-        pass
+        return 0
+    # NOT ACCOUNT_TYPE_DICT alone: the xtquant that wins inside Big QMT is the
+    # terminal's own bundled copy, which has 91 of this shim's 538 names and
+    # does not include that dict. A client can land on it too -- appending the
+    # QMT python directory to sys.path is a documented way to reach the config
+    # modules. Fall back to the individual *_ACCOUNT constants, which both
+    # copies have.
+    table = getattr(xtconstant, "ACCOUNT_TYPE_DICT", None)
+    if isinstance(table, dict):
+        for code, name in table.items():
+            if str(name).strip().upper() == upper:
+                try:
+                    return int(code)
+                except (TypeError, ValueError):
+                    break
+    for attribute in ("%s_ACCOUNT" % upper,
+                      "SECURITY_ACCOUNT" if upper == "STOCK" else ""):
+        if not attribute:
+            continue
+        code = getattr(xtconstant, attribute, None)
+        if isinstance(code, int) and not isinstance(code, bool):
+            return int(code)
     return 0
 
 

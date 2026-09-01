@@ -37,15 +37,44 @@ PRICE_TYPE_ALIASES = {
 # why they passed while the mapping was wrong.
 _XC = _xtconstant
 
-# Name -> xtconstant code, built FROM xtconstant rather than written out: PR #88
-# is the standing reminder of what happens when these are typed as literals.
-# "SECURITY" is an alias because xtconstant spells the constant
-# SECURITY_ACCOUNT while ACCOUNT_TYPE_DICT names it "STOCK".
-ACCOUNT_TYPE_CODES = dict(
-    (str(name).strip().upper(), int(code))
-    for code, name in _xtconstant.ACCOUNT_TYPE_DICT.items()
-)
-ACCOUNT_TYPE_CODES["SECURITY"] = _XC.SECURITY_ACCOUNT
+def _account_type_codes():
+    """Name -> xtconstant account-type code.
+
+    Read off xtconstant rather than written out (PR #88 is the standing
+    reminder about literals), but NOT off ACCOUNT_TYPE_DICT: the xtquant that
+    wins inside Big QMT is the terminal's own bundled copy at
+    bin.x64/Lib/site-packages/xtquant, not this repo's shim, and it carries 91
+    names where the shim has 538. ACCOUNT_TYPE_DICT is one of the 447 it does
+    not have -- reading it at import time took the whole order gateway down
+    with "module 'xtquant.xtconstant' has no attribute ACCOUNT_TYPE_DICT",
+    which surfaces to clients as "order_gateway is not configured".
+
+    So: the dict when it exists, and the individual *_ACCOUNT constants
+    otherwise. Those 8 are in both copies.
+    """
+    codes = {}
+    table = getattr(_xtconstant, "ACCOUNT_TYPE_DICT", None)
+    if isinstance(table, dict):
+        for code, name in table.items():
+            try:
+                codes[str(name).strip().upper()] = int(code)
+            except (TypeError, ValueError):
+                continue
+    for attribute in dir(_xtconstant):
+        if not attribute.endswith("_ACCOUNT"):
+            continue
+        value = getattr(_xtconstant, attribute)
+        if isinstance(value, int) and not isinstance(value, bool):
+            codes.setdefault(attribute[:-len("_ACCOUNT")], value)
+    # ACCOUNT_TYPE_DICT names SECURITY_ACCOUNT "STOCK"; the attribute scan
+    # yields "SECURITY". Both spellings reach callers, so keep both.
+    security = getattr(_xtconstant, "SECURITY_ACCOUNT", 2)
+    codes.setdefault("STOCK", security)
+    codes.setdefault("SECURITY", security)
+    return codes
+
+
+ACCOUNT_TYPE_CODES = _account_type_codes()
 
 
 def _data_attribute_names(row):
@@ -272,7 +301,7 @@ class BigQmtOrderGateway:
             # Already a code -- some configs set the number directly.
             return int(text)
         except (TypeError, ValueError):
-            return _XC.SECURITY_ACCOUNT
+            return getattr(_xtconstant, "SECURITY_ACCOUNT", 2)
 
     def _instrument_name(self, row, stock_code, cache):
         """证券名称 —— from the row if QMT put it there, else ContextInfo.
