@@ -105,7 +105,10 @@ def get_trading_dates(market, start_time="", end_time="", count=-1):
 
 
 def get_stock_type(stock):
-    return _compat.xtdata.call_method("get_stock_type", stock=stock)
+    # 走包装而不是 call_method：包装里写了为什么这个方法在大 QMT 上答不了
+    # （ContextInfo stub 对任何代码都返回 0）。两条路径必须一致，否则
+    # 顶层 xtdata 还会把那个 0 递给调用方。
+    return _compat.xtdata.get_stock_type(stock)
 
 
 def get_holidays():

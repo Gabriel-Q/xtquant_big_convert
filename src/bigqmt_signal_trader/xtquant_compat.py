@@ -1372,6 +1372,40 @@ class BigQmtXtData:
     def get_instrument_type(self, stock_code, variety_list=None):
         return self._call("get_instrument_type", code=stock_code, variety_list=variety_list)
 
+    def get_stock_type(self, stock_code, variety_list=None):
+        """xtdata.get_stock_type 的同名封装 —— 大 QMT 上答不了，直接报错。
+
+        服务端走的是 ContextInfo.get_stock_type(stock)。这个 stub 在大 QMT 上
+        存在（缺失会抛 NotImplementedError），但**对任何代码都返回 0**：实测
+        股票 600000.SH、ETF 589820.SH、沪市债券 186511.SH、期权
+        10011096.SHO 全部是 0，换代码格式（600000 / SH600000 /
+        600000.SSE）也一样。
+
+        返回一个恒为 0 的"类型"比报 AttributeError 更糟：报错看得见，一个
+        错的分类看不见。所以这里显式拒绝，并指向真正能用的那个：
+        get_instrument_type()，实测能区分 stock / fund / etf / bond / index。
+        """
+        raise NotImplementedError(
+            "get_stock_type is not usable on Big QMT: the server-side "
+            "ContextInfo.get_stock_type stub returns 0 for every code "
+            "(verified live against a stock, an ETF, a bond and an option, and "
+            "against every code format). Use get_instrument_type(stock_code) "
+            "instead -- it returns "
+            "{'stock': ..., 'fund': ..., 'etf': ..., 'bond': ..., 'index': ...}."
+        )
+
+    def subscribe_l2thousand(self, stock_code, gear_num=None, callback=None):
+        """千档盘口订阅。
+
+        callback 在 RPC 模型下没有回调通道，服务端会忽略它 —— 想要推送请用
+        subscribe_whole_quote。这里保留形参只为和 xtdata 签名一致。
+        """
+        return self._call(
+            "subscribe_l2thousand",
+            stock_code=stock_code,
+            gear_num=0 if gear_num is None else gear_num,
+        )
+
     def get_stock_list_in_sector(self, sector_name, real_timetag=-1):
         name = str(sector_name or "")
         try:
@@ -1983,6 +2017,23 @@ class BigQmtXtData:
 
     def download_etf_info(self):
         return self._call("download_etf_info")
+
+    # 下面四个的服务端实现和 RPC 白名单一直都在（market_bigqmt 的
+    # download_* 方法 + redis_rpc 的 MARKET_DATA_METHODS），只是客户端漏了这层
+    # 包装，于是外部调用直接撞 AttributeError（issue #130）。
+    def download_sector_data(self):
+        return self._call("download_sector_data")
+
+    def download_cb_data(self):
+        return self._call("download_cb_data")
+
+    def download_index_weight(self):
+        return self._call("download_index_weight")
+
+    def download_history_contracts(self, incrementally=True):
+        # 形参保留是为了和 xtdata.download_history_contracts(incrementally=True)
+        # 签名一致；大 QMT 那边这个调用没有增量参数，服务端按全量下载处理。
+        return self._call("download_history_contracts")
 
     def get_option_list(self, undl_code, dedate, opttype="", isavailavle=False):
         return self._call("get_option_list", undl_code=undl_code, dedate=dedate, opttype=opttype, isavailavle=isavailavle)
