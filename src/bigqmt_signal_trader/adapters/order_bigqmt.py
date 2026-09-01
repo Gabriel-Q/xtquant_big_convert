@@ -77,6 +77,21 @@ def _account_type_codes():
 ACCOUNT_TYPE_CODES = _account_type_codes()
 
 
+def _first_nonzero(row, names, default=0.0):
+    """First candidate attribute with a non-zero numeric value."""
+    for name in names:
+        value = getattr(row, name, None)
+        if value is None:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if number:
+            return number
+    return default
+
+
 def _data_attribute_names(row):
     """Public non-callable attribute names on a QMT row object.
 
@@ -426,6 +441,11 @@ class BigQmtOrderGateway:
                     # them, so every client saw AttributeError (issue #133).
                     account_type=account_type_code,
                     instrument_name=self._instrument_name(row, stock_code, name_cache),
+                    # 股东代码. MiniQMT's XtOrder has it; the ORDER rows this
+                    # terminal returns do not -- none of their 120 attributes
+                    # is a shareholder id. Kept so the field exists (a caller
+                    # reading it gets "" rather than AttributeError) and so a
+                    # broker whose QMT does supply it is picked up.
                     secu_account=str(_attr(row, ("m_strShareholderID", "m_strSecuAccount",
                                                  "secu_account"), "") or ""),
                     offset_flag=_attr(row, ("m_nOffsetFlag", "offset_flag")),
@@ -482,12 +502,14 @@ class BigQmtOrderGateway:
                     # 官方 Deal 字段: m_dTradeAmount 成交额; m_strTradeDate+
                     # m_strTradeTime 合成 Unix 秒; 策略名来自查询过滤参数。
                     amount=float(_attr(row, ("m_dTradeAmount", "amount"), 0.0) or 0.0),
-                    # The row's own strategy name first. This used to echo the
-                    # query filter and nothing else, so an unfiltered query --
-                    # the default -- reported "" for every deal no matter what
-                    # the order was submitted under (issue #133). The filter
-                    # stays as the fallback: when one IS given, every row in
-                    # the result belongs to it by construction.
+                    # The row's own strategy name first -- though on this
+                    # terminal there is none: neither ORDER nor DEAL rows carry
+                    # m_strStrategyName. QMT filters by strategy without ever
+                    # reporting it, which is why the field read "" for
+                    # everything (issue #133). The filter is the fallback: when
+                    # one IS given every row belongs to it by construction. For
+                    # orders this bridge submitted, the RPC layer puts the real
+                    # name back from the identity store.
                     strategy_name=str(
                         _attr(row, ("m_strStrategyName", "strategy_name"), "")
                         or strategy_name or ""
@@ -500,10 +522,12 @@ class BigQmtOrderGateway:
                     instrument_name=self._instrument_name(row, stock_code, name_cache),
                     secu_account=str(_attr(row, ("m_strShareholderID", "m_strSecuAccount",
                                                  "secu_account"), "") or ""),
-                    # XtTrade.commission 手续费. QMT spells it m_dComssion in
-                    # places -- both are tried rather than guessed at.
-                    commission=float(_attr(row, ("m_dComssion", "m_dCommission",
-                                                 "commission"), 0.0) or 0.0),
+                    # XtTrade.commission 手续费. A live DEAL row carries BOTH
+                    # m_dComssion (QMT's own misspelling) and m_dCommission, so
+                    # first-non-None would stop at whichever comes first even
+                    # when it is the 0.0 one. Take the first non-zero instead.
+                    commission=_first_nonzero(
+                        row, ("m_dComssion", "m_dCommission", "commission")),
                     offset_flag=_attr(row, ("m_nOffsetFlag", "offset_flag")),
                     direction=_attr(row, ("m_nDirection", "direction")),
                 )
