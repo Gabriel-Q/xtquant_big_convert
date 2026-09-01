@@ -15,6 +15,7 @@
 | 行情快照 | 2 | `get_ticks` / `get_instrument` |
 | 行情/K线/基本面（转发适配器）| 84 | 见下表 |
 | 账户/持仓/委托 | 6 | `get_asset` / `get_positions` / `query_stock_position` / `query_orders` / `query_trades` / `describe_trade_detail_fields` |
+| 运维 | 2 | `reload_deployment` / `reload_status` |
 | 交易扩展查询（官方函数）| 13 | `get_value_by_order_id` / `get_last_order_id` / `get_ipo_data` / `get_new_purchase_limit` / `get_history_trade_detail_data` / 融资融券5个 / 期权持仓2个 / 港股通汇率 |
 | 持仓同步 | 1 | `sync_positions` |
 | 下单/撤单 | 2 | `submit_order` / `cancel_order`（默认关闭）|
@@ -272,6 +273,22 @@
 - **strategy_name 取值**（issue #133）：优先取 DEAL 行自己的 `m_strStrategyName`，
   取不到才回填查询过滤参数。以前只有后一半，所以不过滤查全部（默认）时
   这个字段恒为空字符串。
+
+### `reload_deployment` / `reload_status`
+- **参数**：`reload_deployment` 接 `reason`(str, 可选)；`reload_status` 无参数
+- **返回**：`{"scheduled": True, "version_before": "...", "note": "..."}`；
+  `reload_status` 返回 `{"ok": ..., "pending": ..., "modules_purged": N,
+  "version_before": ..., "version_after": ..., "seconds": ..., "error": ""}`
+- **用途**：同步了包代码之后，**不重启策略**就让它生效。做法是把所有
+  `bigqmt_signal_trader.*` 从 `sys.modules` 里清掉、重新绑定策略模块在 import
+  时持有的引用、再跑一次 `init()` 重建对象图。
+- **只是「已排期」**：执行它要调 `reset_app()`，那会停掉正在应答这个请求的 RPC
+  服务，所以回复必须先发出去。真正的重载在下一个 adjust tick 上做，
+  轮询 `reload_status` 看结果。期间会有约 1 秒查询超时（服务正在重建）。
+- **刷新不了的**：`bigqmt_signal_trader_strategy.py` 和 `BIGQMT_REDIS_DRYRUN.py`
+  —— QMT 自己 exec 这两个文件，**模块没法 reload 自己所在的模块**。改这两个
+  仍然要重启策略。
+- **客户端**：`xt_trader.reload_deployment("why")` / `xt_trader.reload_status()`
 
 ### `describe_trade_detail_fields`
 - **参数**：`account_id`(可选) `detail_types`(list, 默认 `["ORDER", "DEAL"]`)
