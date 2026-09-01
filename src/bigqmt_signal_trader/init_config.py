@@ -79,6 +79,22 @@ def _zmq_default_port(account_id):
     return _default_zmq_port(account_id)
 
 
+def _zmq_server_bind_host(client_host):
+    """Bind loopback for same-host clients, wildcard for a remote QMT host.
+
+    ``client_host`` is the address the external program uses to reach the QMT
+    machine.  A server cannot bind that public/DNS name reliably, so a remote
+    deployment listens on all local interfaces and leaves interface/firewall
+    restriction to the operator.
+    """
+    normalized = str(client_host or "").strip().lower()
+    if normalized in ("", "127.0.0.1", "localhost"):
+        from .transports.zmq_transport import DEFAULT_ZMQ_HOST
+
+        return DEFAULT_ZMQ_HOST
+    return "0.0.0.0"
+
+
 def render_server_config(answers):
     """bigqmt_signal_trader_local_config.py -- read by the QMT-side strategy."""
     lines = [
@@ -101,6 +117,14 @@ def render_server_config(answers):
         '    "username": %r,' % str(answers["username"]),
         '    "password": %r,' % str(answers["password"]),
     ]
+    if str(answers["transport"]) == "zmq":
+        port = _zmq_default_port(answers["account_id"])
+        bind_host = _zmq_server_bind_host(answers["host"])
+        lines.extend([
+            "    # Same-host ZMQ stays on loopback. A remote QMT address makes the",
+            "    # server bind all interfaces; restrict that port with a firewall.",
+            '    "zmq": {"bind_address": "tcp://%s:%d"},' % (bind_host, port),
+        ])
     if answers["allow_order_methods"]:
         lines.append("    # Remote order/cancel is ON. Turn it off if you only need queries.")
     else:
@@ -159,10 +183,14 @@ def render_client_config(answers):
     if transport == "zmq":
         port = _zmq_default_port(answers["account_id"])
         lines.extend([
-            "    # The QMT-side server derives this port from the account id. Set it",
-            "    # explicitly to skip service discovery; change it if the server logs",
-            "    # a different bind port.",
-            '    "zmq": {"connect_address": "tcp://%s:%d"},' % (str(answers["host"]), port),
+            "    # QMT host/port are explicit so RPC and quote-push clients use the",
+            "    # same machine. The server config generated alongside this file",
+            "    # binds loopback for local use or 0.0.0.0 for a remote QMT host.",
+            '    "zmq": {',
+            '        "host": %r,' % str(answers["host"]),
+            '        "port": %d,' % port,
+            '        "connect_address": "tcp://%s:%d",' % (str(answers["host"]), port),
+            "    },",
         ])
     lines.extend([
         "}",
@@ -313,10 +341,19 @@ def prompt_answers(write, read, read_secret=None):
             write, read, "Redis 密码（无则回车，输入不回显）", "",
             secret=True, read_secret=read_secret)
     else:
-        answers["host"] = _ask(write, read, "服务端地址", DEFAULTS["host"])
+        answers["host"] = _ask(
+            write, read,
+            "QMT 终端地址（同机用 127.0.0.1；跨机填 QMT 主机 IP/主机名）",
+            DEFAULTS["host"],
+        )
         answers["port"] = _zmq_default_port(answers["account_id"])
         write("  zmq 端口按账号推导为 %d（服务端日志会打印实际绑定端口）。\n"
               % answers["port"])
+        if _zmq_server_bind_host(answers["host"]) == "0.0.0.0":
+            write(
+                "  跨机 ZMQ 会让 QMT 服务端绑定 0.0.0.0；请用 Windows "
+                "防火墙把该端口限制到可信客户端。\n"
+            )
 
     write("\n远程下单/撤单默认关闭。打开后，任何能连上这条通道的程序都可以下单。\n")
     answers["allow_order_methods"] = _ask_bool(
