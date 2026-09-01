@@ -7,6 +7,7 @@ The Big QMT process remains the only place that touches QMT runtime APIs.
 
 import os
 import json
+import math
 import time
 import uuid
 import queue as _queue
@@ -57,6 +58,98 @@ DEFAULT_DOWNLOAD_FIELDS = ["open", "high", "low", "close", "volume", "amount"]
 # so a wide stock_list either fits or loses everything (issue #47).
 DEFAULT_MARKET_DATA_CHUNK = 100
 _TIME_COL_NAMES = ("stime", "time", "index", "date", "datetime", "timetag")
+
+
+def _latest_close(market_data, stock_code):
+    """Extract the newest finite positive close from normalized market data."""
+    if not isinstance(market_data, dict):
+        return None
+    frame = market_data.get(stock_code)
+    if frame is None:
+        frame = market_data.get(str(stock_code).upper())
+    if frame is None:
+        return None
+
+    values = None
+    if hasattr(frame, "columns") and "close" in getattr(frame, "columns", ()):
+        values = frame["close"]
+    elif isinstance(frame, dict):
+        values = frame.get("close")
+    elif isinstance(frame, (list, tuple)):
+        for row in reversed(frame):
+            if isinstance(row, dict) and "close" in row:
+                values = [row.get("close")]
+                break
+
+    if values is None:
+        return None
+    if hasattr(values, "dropna"):
+        values = values.dropna()
+    try:
+        value = values.iloc[-1]
+    except Exception:
+        if isinstance(values, dict):
+            if not values:
+                return None
+            value = values[sorted(values.keys())[-1]]
+        elif isinstance(values, (list, tuple)):
+            value = values[-1] if values else None
+        else:
+            value = values
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def _detail_value(detail, *names):
+    if not isinstance(detail, dict):
+        return None
+    for name in names:
+        if name in detail and detail[name] not in (None, ""):
+            return detail[name]
+    lowered = {str(key).lower(): value for key, value in detail.items()}
+    for name in names:
+        value = lowered.get(str(name).lower())
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _option_underlying_code(detail):
+    code = str(_detail_value(
+        detail, "OptUndlCode", "underlying_code", "underlyingCode"
+    ) or "").strip().upper()
+    market = str(_detail_value(
+        detail, "OptUndlMarket", "underlying_market", "underlyingMarket"
+    ) or "").strip().upper()
+    if not code:
+        raise ValueError("option detail has no underlying code")
+    if "." not in code and market:
+        code = "%s.%s" % (code, market)
+    return code
+
+
+def _option_as_of(value):
+    if value is None:
+        return _dt.datetime.now()
+    if isinstance(value, _dt.datetime):
+        return value
+    if isinstance(value, _dt.date):
+        return _dt.datetime.combine(value, _dt.time())
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        if timestamp > 100000000000:
+            timestamp /= 1000.0
+        return _dt.datetime.fromtimestamp(timestamp)
+    text = str(value).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y%m%d%H%M%S", "%Y-%m-%d", "%Y%m%d"):
+        try:
+            return _dt.datetime.strptime(text, fmt)
+        except ValueError:
+            pass
+    raise ValueError("as_of must be datetime, timestamp, YYYYMMDD or ISO local time")
 
 
 def _as_list(value):
@@ -2328,6 +2421,282 @@ class BigQmtXtData:
 
     def get_option_iv(self, opt_code):
         return self._call("get_option_iv", opt_code=opt_code)
+
+    @staticmethod
+    def _option_analytics_from_detail(
+        opt_code,
+        detail,
+        option_price,
+        underlying_price,
+        as_of=None,
+        risk_free_rate=None,
+        dividend_yield=0.0,
+        price_period="1m",
+        option_price_source="argument",
+        underlying_price_source="argument",
+    ):
+        """Build one contract result from already-fetched metadata and prices."""
+        from .option_analytics import calculate_option_analytics
+
+        option_type = _detail_value(detail, "optType", "OptType", "option_type")
+        strike_price = _detail_value(
+            detail, "OptExercisePrice", "exercise_price", "strike_price"
+        )
+        expiry_value = _detail_value(
+            detail, "ExpireDate", "EndDelivDate", "expire_date", "expiry_date"
+        )
+        if option_type is None:
+            raise ValueError("option detail has no option type")
+        if strike_price is None:
+            raise ValueError("option detail has no exercise price")
+        if expiry_value is None:
+            raise ValueError("option detail has no expiry date")
+
+        expiry_text = str(expiry_value).strip().replace("-", "")[:8]
+        try:
+            expiry_date = _dt.datetime.strptime(expiry_text, "%Y%m%d")
+        except ValueError:
+            raise ValueError("unsupported option expiry date %r" % expiry_value)
+        # SSE/SZSE ETF options stop trading at 15:00 local time.  Using the
+        # close rather than midnight avoids losing almost a full day of theta.
+        expiry_at = expiry_date.replace(hour=15)
+        valued_at = _option_as_of(as_of)
+        days_to_expiry = (expiry_at - valued_at).total_seconds() / 86400.0
+        if days_to_expiry <= 0:
+            raise ValueError("option expired at %s" % expiry_at.strftime("%Y-%m-%d %H:%M:%S"))
+
+        if risk_free_rate is None:
+            risk_free_rate = _detail_value(
+                detail, "OptUndlRiskFreeRate", "risk_free_rate", "riskFreeRate"
+            )
+        if risk_free_rate in (None, ""):
+            risk_free_rate = 0.0
+
+        result = calculate_option_analytics(
+            option_type=option_type,
+            underlying_price=underlying_price,
+            strike_price=strike_price,
+            option_price=option_price,
+            days_to_expiry=days_to_expiry,
+            risk_free_rate=risk_free_rate,
+            dividend_yield=dividend_yield,
+        )
+        result.update({
+            "option_code": str(opt_code).upper(),
+            "underlying_code": _option_underlying_code(detail),
+            "expiry_date": expiry_at.strftime("%Y%m%d"),
+            "as_of": valued_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "price_period": str(price_period),
+            "option_price_source": option_price_source,
+            "underlying_price_source": underlying_price_source,
+            "greek_units": {
+                "vega": "price per 1.00 volatility",
+                "vega_1pct": "price per 1 volatility point",
+                "theta_per_year": "price per calendar year",
+                "theta_per_day": "price per calendar day",
+                "rho": "price per 1.00 rate",
+                "rho_1pct": "price per 1 rate point",
+            },
+        })
+        return result
+
+    def get_option_analytics(
+        self,
+        opt_code,
+        option_price=None,
+        underlying_price=None,
+        as_of=None,
+        risk_free_rate=None,
+        dividend_yield=0.0,
+        price_period="1m",
+        include_native_iv=False,
+    ):
+        """Return local IV and standard Greeks for one option contract.
+
+        Contract metadata comes from ``get_option_detail_data``.  Missing
+        prices are filled from the latest close for the option and underlying
+        in one ``get_market_data_ex`` request, using only ``close`` so the
+        FormulaServer fast path remains available.  Explicit prices always win,
+        which makes the method suitable for live bid/ask/mid calculations too.
+
+        This intentionally does not replace ``get_option_iv``: the original RPC
+        remains API-compatible while this method supplies a deterministic
+        fallback when the terminal reports 0.0 or exposes no Greeks.
+        """
+        code = str(opt_code or "").strip().upper()
+        if not code:
+            raise ValueError("opt_code is required")
+        detail = self.get_option_detail_data(code)
+        if not isinstance(detail, dict) or not detail:
+            raise ValueError("no option detail for %s" % code)
+        underlying_code = _option_underlying_code(detail)
+
+        market_data = {}
+        needed_codes = []
+        if option_price is None:
+            needed_codes.append(code)
+        if underlying_price is None:
+            needed_codes.append(underlying_code)
+        if needed_codes:
+            market_data = self.get_market_data_ex(
+                field_list=["close"],
+                stock_list=needed_codes,
+                period=price_period,
+                count=1,
+                fill_data=False,
+            ) or {}
+        if option_price is None:
+            option_price = _latest_close(market_data, code)
+            if option_price is None:
+                raise ValueError("no positive %s close for %s" % (price_period, code))
+            option_source = "%s_close" % price_period
+        else:
+            option_source = "argument"
+        if underlying_price is None:
+            underlying_price = _latest_close(market_data, underlying_code)
+            if underlying_price is None:
+                raise ValueError(
+                    "no positive %s close for %s" % (price_period, underlying_code)
+                )
+            underlying_source = "%s_close" % price_period
+        else:
+            underlying_source = "argument"
+
+        result = self._option_analytics_from_detail(
+            code,
+            detail,
+            option_price,
+            underlying_price,
+            as_of=as_of,
+            risk_free_rate=risk_free_rate,
+            dividend_yield=dividend_yield,
+            price_period=price_period,
+            option_price_source=option_source,
+            underlying_price_source=underlying_source,
+        )
+        if include_native_iv:
+            try:
+                result["native_iv"] = self.get_option_iv(code)
+            except Exception as exc:
+                result["native_iv"] = None
+                result["native_iv_error"] = str(exc)
+        return result
+
+    def get_option_chain_analytics(
+        self,
+        undl_code,
+        dedate,
+        opttype="",
+        isavailavle=False,
+        underlying_price=None,
+        as_of=None,
+        risk_free_rate=None,
+        dividend_yield=0.0,
+        price_period="1m",
+    ):
+        """Calculate a whole expiry's IV/Greeks with one batched price read.
+
+        A stale or crossed close can violate no-arbitrage bounds.  Such a
+        contract is retained with ``analytics_error`` rather than aborting the
+        entire chain, so callers can distinguish missing/bad prices from valid
+        Greeks and decide whether to substitute a bid/ask midpoint.
+        """
+        codes = list(self.get_option_list(
+            undl_code, dedate, opttype=opttype, isavailavle=isavailavle
+        ) or [])
+        details = {}
+        detail_errors = {}
+        for raw_code in codes:
+            code = str(raw_code).strip().upper()
+            try:
+                detail = self.get_option_detail_data(code)
+                if not isinstance(detail, dict) or not detail:
+                    raise ValueError("empty option detail")
+                details[code] = detail
+            except Exception as exc:
+                detail_errors[code] = str(exc)
+
+        underlying_code = str(undl_code or "").strip().upper()
+        if details:
+            underlying_code = _option_underlying_code(next(iter(details.values())))
+        price_codes = list(details.keys())
+        if underlying_price is None and underlying_code:
+            price_codes.append(underlying_code)
+        market_data = self.get_market_data_ex(
+            field_list=["close"],
+            stock_list=price_codes,
+            period=price_period,
+            count=1,
+            fill_data=False,
+        ) if price_codes else {}
+        market_data = market_data or {}
+        if underlying_price is None:
+            underlying_price = _latest_close(market_data, underlying_code)
+            underlying_source = "%s_close" % price_period
+        else:
+            underlying_source = "argument"
+
+        contracts = []
+        for raw_code in codes:
+            code = str(raw_code).strip().upper()
+            if code in detail_errors:
+                contracts.append({
+                    "option_code": code,
+                    "analytics_error": detail_errors[code],
+                })
+                continue
+            detail = details[code]
+            option_price = _latest_close(market_data, code)
+            base = {
+                "option_code": code,
+                "underlying_code": underlying_code,
+                "option_price": option_price,
+                "option_type": _detail_value(detail, "optType", "OptType", "option_type"),
+                "strike_price": _detail_value(
+                    detail, "OptExercisePrice", "exercise_price", "strike_price"
+                ),
+                "expiry_date": str(_detail_value(
+                    detail, "ExpireDate", "EndDelivDate", "expire_date", "expiry_date"
+                ) or ""),
+            }
+            try:
+                if underlying_price is None:
+                    raise ValueError("no positive %s close for %s" % (
+                        price_period, underlying_code
+                    ))
+                if option_price is None:
+                    raise ValueError("no positive %s close for %s" % (
+                        price_period, code
+                    ))
+                item = self._option_analytics_from_detail(
+                    code,
+                    detail,
+                    option_price,
+                    underlying_price,
+                    as_of=as_of,
+                    risk_free_rate=risk_free_rate,
+                    dividend_yield=dividend_yield,
+                    price_period=price_period,
+                    option_price_source="%s_close" % price_period,
+                    underlying_price_source=underlying_source,
+                )
+            except Exception as exc:
+                base["analytics_error"] = str(exc)
+                item = base
+            contracts.append(item)
+
+        valid_count = sum(1 for item in contracts if "analytics_error" not in item)
+        return {
+            "underlying_code": underlying_code,
+            "underlying_price": underlying_price,
+            "dedate": str(dedate),
+            "as_of": _option_as_of(as_of).strftime("%Y-%m-%d %H:%M:%S"),
+            "price_period": str(price_period),
+            "count": len(contracts),
+            "valid_count": valid_count,
+            "error_count": len(contracts) - valid_count,
+            "contracts": contracts,
+        }
 
     def get_option_detail_data(self, stockcode):
         return self._call("get_option_detail_data", stockcode=stockcode)

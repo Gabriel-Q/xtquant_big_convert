@@ -90,7 +90,12 @@ def _ensure_qmt_python_on_path() -> None:
         local_cfg = os.path.join(c, "bigqmt_signal_trader_local_config.py")
         if os.path.isfile(local_cfg):
             if c not in sys.path:
-                sys.path.insert(0, c)
+                # This path is needed to discover local_config.py, but must not
+                # shadow the checked-out/PyPI client package selected above.
+                # QMT commonly carries an older deployed package of the same
+                # name; putting it at sys.path[0] made new CLI commands execute
+                # against that stale copy.
+                sys.path.append(c)
             return
 
 
@@ -456,6 +461,38 @@ def cmd_instrument(args):
     if detail is None:
         _err("未找到合约: %s" % args.code)
     _ok(detail, table=args.table)
+
+
+def cmd_option_greeks(args):
+    """Calculate one contract or a whole expiry locally from QMT market data."""
+    _, xtdata, _ = _init()
+    try:
+        common = {
+            "as_of": args.as_of,
+            "risk_free_rate": args.risk_free,
+            "dividend_yield": args.dividend,
+            "price_period": args.period,
+        }
+        if args.expiry:
+            result = xtdata.get_option_chain_analytics(
+                args.code,
+                args.expiry,
+                opttype=args.option_type or "",
+                isavailavle=args.available,
+                underlying_price=args.underlying_price,
+                **common
+            )
+        else:
+            result = xtdata.get_option_analytics(
+                args.code,
+                option_price=args.option_price,
+                underlying_price=args.underlying_price,
+                include_native_iv=args.native_iv,
+                **common
+            )
+    except Exception as e:
+        _err("期权 IV/Greeks 计算失败", detail=str(e), code="QUERY_FAIL")
+    _ok(result, table=args.table)
 
 
 def cmd_sector(args):
@@ -824,6 +861,21 @@ def build_parser():
     sp = sub.add_parser("instrument", help="合约详情")
     sp.add_argument("code", help="股票代码")
     sp.set_defaults(func=cmd_instrument)
+
+    # option-greeks: one option code, or underlying + --expiry for a chain.
+    sp = sub.add_parser("option-greeks", help="本地计算期权 IV 和标准 Greeks")
+    sp.add_argument("code", help="期权代码；使用 --expiry 时传标的代码")
+    sp.add_argument("--expiry", default=None, help="到期月份/日期；提供后计算整条期权链")
+    sp.add_argument("--option-type", default="", help="期权链筛选 C/P")
+    sp.add_argument("--option-price", type=float, default=None, help="单合约期权价格（默认最新 close）")
+    sp.add_argument("--underlying-price", type=float, default=None, help="标的价格（默认最新 close）")
+    sp.add_argument("--risk-free", type=float, default=None, help="无风险利率小数（默认合约元数据）")
+    sp.add_argument("--dividend", type=float, default=0.0, help="连续分红率小数")
+    sp.add_argument("--as-of", default=None, help="估值时点 YYYY-MM-DD HH:MM:SS")
+    sp.add_argument("--period", default="1m", help="缺省价格所用 K 线周期")
+    sp.add_argument("--available", action="store_true", help="期权链只取可用合约")
+    sp.add_argument("--native-iv", action="store_true", help="单合约同时返回 QMT 原生 IV 作对照")
+    sp.set_defaults(func=cmd_option_greeks)
 
     # sector
     sp = sub.add_parser("sector", help="板块查询")
