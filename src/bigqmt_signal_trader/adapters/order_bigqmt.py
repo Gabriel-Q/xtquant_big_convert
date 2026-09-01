@@ -143,6 +143,81 @@ _CREDIT_SELL_SIDE = frozenset({
 })
 
 
+# passorder 的 opType 直通表：期货和 ETF 期权把「开/平、今/昨」编码在 opType
+# 本身里。映射回 BUY/SELL 再重新拼一个 opType 会丢掉这些信息 —— 平今多会变成
+# 普通卖出，这跟 issue #103 里 融资买入 变普通买入 是同一类错误。所以原样透传。
+#
+# 依据：https://dict.thinktrader.net/innerApi/enum_constants.html?id=NF25nX
+#   期货/股指期权/商品期权   0-15   六键 0-5、四键 6-9、两键 10-15
+#   ETF 期权                50-59
+# 官方表里 16-22 没有定义，不要往里塞。
+FUTURE_OP_TYPES = frozenset(range(0, 16))
+ETF_OPTION_OP_TYPES = frozenset(range(50, 60))
+PASSTHROUGH_OP_TYPES = FUTURE_OP_TYPES | ETF_OPTION_OP_TYPES
+
+# 只用于记账的买卖方向。真正送进 passorder 的是上面的原始 opType。
+#   平多 / 平昨多 / 平今多 是卖出动作；平空 / 平昨空 / 平今空 是买入动作。
+_FUTURE_BUY_SIDE = frozenset({
+    0,   # 开多
+    4,   # 平昨空
+    5,   # 平今空
+    8,   # 平空，优先平今
+    9,   # 平空，优先平昨
+    12,  # 买入，如有空仓优先平今，余量开多
+    13,  # 买入，如有空仓优先平昨，余量开多
+    14,  # 买入，不优先平仓
+})
+_FUTURE_SELL_SIDE = frozenset({
+    1,   # 平昨多
+    2,   # 平今多
+    3,   # 开空
+    6,   # 平多，优先平今
+    7,   # 平多，优先平昨
+    10,  # 卖出，如有多仓优先平今，余量开空
+    11,  # 卖出，如有多仓优先平昨，余量开空
+    15,  # 卖出，不优先平仓
+})
+_ETF_OPTION_BUY_SIDE = frozenset({
+    50,  # 买入开仓
+    53,  # 买入平仓
+    55,  # 备兑平仓
+})
+_ETF_OPTION_SELL_SIDE = frozenset({
+    51,  # 卖出平仓
+    52,  # 卖出开仓
+    54,  # 备兑开仓
+})
+# 56 认购行权 / 57 认沽行权 / 58 证券锁定 / 59 证券解锁 没有买卖方向，
+# 和 直接还款(32) 一样必须由调用方显式传 action。
+
+# 能接受直通 opType 的账号类型（见 init_config.ACCOUNT_TYPES）。
+# 股票账号收到期货 opType 时必须拒绝，不能回落到 23/24 —— 那会真的发出
+# 一笔品种和方向都不对的股票单。
+PASSTHROUGH_ACCOUNT_TYPES = frozenset({"FUTURE", "STOCK_OPTION"})
+
+
+def passthrough_optype_of(order_type):
+    """原样送进 passorder 的期货/期权 opType，不是则 None。"""
+    try:
+        value = int(order_type)
+    except (TypeError, ValueError):
+        return None
+    return value if value in PASSTHROUGH_OP_TYPES else None
+
+
+def passthrough_action_of(order_type):
+    """期货/期权 opType 的买卖方向；没有方向（行权、锁定）则 None。"""
+    try:
+        value = int(order_type)
+    except (TypeError, ValueError):
+        return None
+    if value in _FUTURE_BUY_SIDE or value in _ETF_OPTION_BUY_SIDE:
+        return SignalAction.BUY.value
+    if value in _FUTURE_SELL_SIDE or value in _ETF_OPTION_SELL_SIDE:
+        return SignalAction.SELL.value
+    return None
+
+
 def credit_action_of(order_type):
     """BUY / SELL for a credit order_type, or None if it is not one.
 
@@ -357,13 +432,32 @@ class BigQmtOrderGateway:
     def submit(self, request):
         passorder = self._require_passorder()
         action = str(request.action).upper()
-        credit_optype = credit_optype_of(getattr(request, "order_type", None))
+        raw_order_type = getattr(request, "order_type", None)
+        credit_optype = credit_optype_of(raw_order_type)
+        passthrough_optype = passthrough_optype_of(raw_order_type)
         if credit_optype is not None:
             # A credit operation carries more than a side: mapping it back to
             # BUY/SELL would turn 融资买入 into an ordinary buy, which is the
             # bug behind issue #103 -- worse than the rejection it replaced,
             # because it places a real but different order.
             op_type = credit_optype
+        elif passthrough_optype is not None:
+            # Futures/option opTypes carry open-vs-close and today-vs-yesterday.
+            # Forward them untouched -- but only on an account that can trade
+            # them. Letting a futures opType fall through to 23/24 on a STOCK
+            # account is the #103 failure mode again: 平今多 (a close) would go
+            # out as an ordinary stock buy.
+            account_type = str(self.account_type or "").upper()
+            if account_type not in PASSTHROUGH_ACCOUNT_TYPES:
+                raise ValueError(
+                    # ASCII only: this goes to QMT's own log, which drops
+                    # non-ASCII (a Chinese install path came back mangled).
+                    "order_type %s is a futures/option opType but account_type "
+                    "is %r. Set account_type to one of %s, or use 23/24 for "
+                    "stock orders." % (
+                        passthrough_optype, self.account_type,
+                        "/".join(sorted(PASSTHROUGH_ACCOUNT_TYPES))))
+            op_type = passthrough_optype
         elif action == SignalAction.BUY.value:
             op_type = 23
         elif action == SignalAction.SELL.value:
