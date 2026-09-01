@@ -1450,7 +1450,13 @@ python qmt-trader/scripts/qmt.py buy 600000.SH 100 --price 7.50 --dry-run
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=litaolemo/xtquant_big_convert&type=Date)](https://www.star-history.com/#litaolemo/xtquant_big_convert&Date)
+<a href="https://www.star-history.com/?type=date&repos=litaolemo%2Fxtquant_big_convert">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=litaolemo/xtquant_big_convert&type=date&theme=dark&legend=top-left&sealed_token=M0zvEpSA9HcfTNWQLSFDhW5u4faF-JaCYJmiaUKLSFKGUD6RPGYRuYtgiy3aVlnmFbNsaaAo_vCGfrlSwG8FMsUkGoEXJUqdBLwY_JzksEBgYSTtAJFhrw" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=litaolemo/xtquant_big_convert&type=date&legend=top-left&sealed_token=M0zvEpSA9HcfTNWQLSFDhW5u4faF-JaCYJmiaUKLSFKGUD6RPGYRuYtgiy3aVlnmFbNsaaAo_vCGfrlSwG8FMsUkGoEXJUqdBLwY_JzksEBgYSTtAJFhrw" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=litaolemo/xtquant_big_convert&type=date&legend=top-left&sealed_token=M0zvEpSA9HcfTNWQLSFDhW5u4faF-JaCYJmiaUKLSFKGUD6RPGYRuYtgiy3aVlnmFbNsaaAo_vCGfrlSwG8FMsUkGoEXJUqdBLwY_JzksEBgYSTtAJFhrw" />
+ </picture>
+</a>
 
 ---
 
