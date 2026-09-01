@@ -71,6 +71,8 @@ READ_METHODS = {
     "query_trades",
     "query_execution_snapshot",
     "describe_trade_detail_fields",
+    "reload_deployment",
+    "reload_status",
     "query_stock_position",
     "sync_positions",
     "submit_download_history_data",
@@ -134,6 +136,7 @@ LISTENER_DEFERRED_METHODS = {
     "query_orders",
     "query_trades",
     "describe_trade_detail_fields",
+    "reload_deployment",
     "query_account_infos",
     "query_account_status",
     "query_credit_detail",
@@ -712,7 +715,31 @@ class BigQmtRpcHandlers:
             raise RuntimeError("download jobs require a Redis client")
         return redis_client
 
+    def _require_download_worker(self):
+        """Refuse to queue work nothing is going to pick up.
+
+        The worker is _pump_download_jobs on the adjust tick, and it is OFF by
+        default on Big QMT for the reason the runtime records: the terminal's
+        embedded xtdata SDK has no reachable data service, so a download would
+        raise 无法连接行情服务 anyway. Same root cause as the download_* methods
+        in #130.
+
+        Accepting a job into a queue no one drains looks like success and never
+        completes -- worse than the refusal it replaces. So say no, and say
+        which switch turns it on.
+        """
+        if not getattr(self, "download_jobs_enabled", False):
+            raise RuntimeError(
+                "async download jobs are disabled on this deployment, so a "
+                "submitted job would sit in the queue forever: nothing runs it. "
+                "Big QMT's embedded xtdata SDK has no reachable data service to "
+                "download through. Supplement history from the terminal's "
+                "数据管理/补充数据 UI and read it back with get_market_data_ex / "
+                "get_local_data. Set download_jobs_enabled=True in the local "
+                "config only where a MiniQMT/xtdata data service is reachable.")
+
     def _handle_submit_download_history_data2(self, params):
+        self._require_download_worker()
         from .download_jobs import submit_download_job
 
         stock_list = params.get("stock_list") or params.get("stock_code") or []
@@ -899,6 +926,31 @@ class BigQmtRpcHandlers:
         if isinstance(detail_types, str):
             detail_types = [detail_types]
         return describe(self._request_account_id(params), detail_types)
+
+    def _handle_reload_deployment(self, params):
+        """Re-import the package and re-run init, without a strategy restart.
+
+        Only schedules it: the reload calls reset_app(), which stops the RPC
+        service answering this very request, so the reply has to go out first.
+        It runs on the next adjust tick -- poll reload_status.
+
+        Refreshes everything under bigqmt_signal_trader/. Cannot refresh the
+        strategy file or the entry script: QMT execs those, and a module cannot
+        reload the one it is running in. Those still need a restart.
+        """
+        hook = getattr(self, "reload_hook", None)
+        if hook is None:
+            raise RuntimeError(
+                "this deployment cannot reload itself (it predates "
+                "reload_deployment); sync and restart the strategy once, after "
+                "which reloads no longer need a restart")
+        return hook(str((params or {}).get("reason") or ""))
+
+    def _handle_reload_status(self, params):
+        status_hook = getattr(self, "reload_status_hook", None)
+        if status_hook is None:
+            raise RuntimeError("this deployment predates reload_deployment")
+        return status_hook()
 
     def _handle_query_execution_snapshot(self, params):
         if self.order_gateway is None:

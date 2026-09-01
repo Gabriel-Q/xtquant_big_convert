@@ -76,6 +76,72 @@ class WiringTest(unittest.TestCase):
         self.assertIn("_pump_download_jobs", adjust)
 
 
+class WorkerGateTest(unittest.TestCase):
+    """Unlocking the door is only right if someone is behind it.
+
+    _pump_download_jobs is OFF by default on Big QMT, and the runtime says why:
+    the terminal's embedded xtdata SDK has no reachable data service, so the
+    download would raise 无法连接行情服务 -- the same root cause as the
+    download_* methods in #130. Verified live: after the client was wired,
+    submit_download_history_data returned a job id and the job sat at
+    state=pending done=0/1 for 12 seconds while the queue grew to 2 and the
+    active key stayed empty. Nothing was ever going to run it.
+
+    Accepting work into a queue no one drains looks like success and never
+    finishes. That is worse than the refusal it replaced.
+    """
+
+    def _handlers(self, enabled):
+        handlers = BigQmtRpcHandlers.__new__(BigQmtRpcHandlers)
+        handlers.download_job_redis_client = FakeRedis()
+        handlers.download_jobs_enabled = enabled
+        return handlers
+
+    def test_submitting_with_no_worker_is_refused(self):
+        with self.assertRaises(RuntimeError) as caught:
+            self._handlers(False)._handle_submit_download_history_data2({})
+
+        self.assertIn("sit in the queue forever", str(caught.exception))
+
+    def test_the_refusal_names_the_switch(self):
+        with self.assertRaises(RuntimeError) as caught:
+            self._handlers(False)._handle_submit_download_history_data2({})
+
+        self.assertIn("download_jobs_enabled=True", str(caught.exception))
+
+    def test_the_refusal_says_what_to_do_instead(self):
+        with self.assertRaises(RuntimeError) as caught:
+            self._handlers(False)._handle_submit_download_history_data2({})
+
+        message = str(caught.exception)
+        self.assertIn("get_market_data_ex", message)
+
+    def test_an_absent_flag_is_treated_as_off(self):
+        """An older deployment does not set it, and off is the safe reading."""
+        handlers = BigQmtRpcHandlers.__new__(BigQmtRpcHandlers)
+        handlers.download_job_redis_client = FakeRedis()
+
+        with self.assertRaises(RuntimeError):
+            handlers._require_download_worker()
+
+    def test_with_a_worker_it_does_not_refuse(self):
+        self._handlers(True)._require_download_worker()
+
+    def test_reading_status_is_not_gated(self):
+        """A job already queued should still be inspectable -- that is how you
+        see it is stuck."""
+        source = inspect.getsource(BigQmtRpcHandlers._handle_get_download_status)
+
+        self.assertNotIn("_require_download_worker", source)
+
+    def test_the_strategy_wires_the_flag_defaulting_off(self):
+        source = inspect.getsource(strategy._build_rpc_service)
+
+        self.assertIn("handlers.download_jobs_enabled = _config_bool(", source)
+        self.assertIn('(config.get("download_jobs") or {}).get("enabled"), False)',
+                      source)
+
+
 class HandlerTest(unittest.TestCase):
     def _handlers(self, redis_client):
         handlers = BigQmtRpcHandlers.__new__(BigQmtRpcHandlers)

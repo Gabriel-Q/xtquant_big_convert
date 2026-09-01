@@ -3106,6 +3106,29 @@ class BigQmtXtTrader:
         return self.client.call("describe_trade_detail_fields", params,
                                 account_id=account_id) or {}
 
+    def reload_deployment(self, reason="", account=None):
+        """Re-import the deployed package and re-run init, without a restart.
+
+        Returns as soon as the reload is SCHEDULED -- it runs on the next
+        adjust tick, because performing it stops the RPC service answering the
+        request. Poll reload_status() (or get_deployment_info()) for the
+        outcome.
+
+        Refreshes everything under bigqmt_signal_trader/. It cannot refresh
+        bigqmt_signal_trader_strategy.py or the BIGQMT_REDIS_DRYRUN entry --
+        QMT execs those, and a module cannot reload the one it is running in.
+        Changes there still need a strategy restart.
+        """
+        account_id = _account_id(account, self.client.account_id)
+        return self.client.call("reload_deployment", {"reason": str(reason or "")},
+                                account_id=account_id) or {}
+
+    def reload_status(self, account=None):
+        """Outcome of the last reload_deployment, or what is still pending."""
+        account_id = _account_id(account, self.client.account_id)
+        return self.client.call("reload_status", {},
+                                account_id=account_id) or {}
+
     def query_execution_snapshot(
         self,
         account,
