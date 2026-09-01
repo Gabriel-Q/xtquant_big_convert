@@ -521,8 +521,23 @@ class BigQmtRpcHandlers:
             "allow_order_methods": bool(self.allow_order_methods),
             "rpc_revision": RPC_REVISION,
             "version": _deployed_version(),
+            "account_type": self._reported_account_type(),
             "server_time": _dt.datetime.now(),
         }
+
+    def _reported_account_type(self):
+        """What this deployment will actually trade as.
+
+        The client's StockAccount(..., "CREDIT") never reaches the server --
+        the type comes from BIGQMT_ACCOUNT_TYPE in the QMT-side config -- so a
+        caller declaring CREDIT against a STOCK deployment has no way to see
+        the mismatch. It shows up as an all-zero credit asset row instead
+        (issue #92). Empty when there is no gateway to ask.
+        """
+        gateway = self.order_gateway
+        if gateway is None:
+            return ""
+        return str(getattr(gateway, "account_type", "") or "").strip().upper()
 
     def _handle_get_deployment_info(self, params):
         """Where this bridge is running from, and which build it is.

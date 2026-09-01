@@ -354,6 +354,26 @@ def _as_list(value):
     return [value]
 
 
+def _account_type_name(value):
+    """The NAME of an account type, whatever form it arrives in.
+
+    StockAccount stores the numeric code, not the string it was constructed
+    with: StockAccount(id, "CREDIT").account_type is 3. Comparing that against
+    the server's "CREDIT" would report a mismatch on every credit account.
+    """
+    text = str("" if value is None else value).strip()
+    if not text:
+        return ""
+    if text.isdigit():
+        try:
+            from xtquant.xtconstant import ACCOUNT_TYPE_DICT
+
+            return str(ACCOUNT_TYPE_DICT.get(int(text), "")).strip().upper()
+        except Exception:
+            return ""
+    return text.upper()
+
+
 def _restore_jsonable(value):
     if isinstance(value, dict):
         marker = value.get("__bigqmt_type__")
@@ -2392,6 +2412,12 @@ class BigQmtXtTrader:
         self._async_order_lock = threading.Lock()
         # int -> 合同编号 for ids handed out as OrderId (issue #113).
         self._order_sys_ids = _OrderedDict()
+        # on_account_status used to report a hardcoded "STOCK" even for a
+        # credit deployment (issue #103). The server is authoritative -- the
+        # client's StockAccount(..., "CREDIT") never travels -- so prefer what
+        # ping reports, fall back to what the caller declared.
+        self._server_account_type = ""
+        self._declared_account_type = ""
 
     def _cached_position_snapshot(self, account_id):
         key = "bigqmt:positions:%s" % str(account_id or self.client.account_id or "")
@@ -2439,7 +2465,9 @@ class BigQmtXtTrader:
 
     def connect(self):
         if self.client.account_id:
-            mismatch = warn_on_version_mismatch(self.client.call("ping"))
+            pong = self.client.call("ping")
+            self._note_server_account_type(pong)
+            mismatch = warn_on_version_mismatch(pong)
             if mismatch and auto_sync_enabled():
                 self.sync_deployment()
         self._fire_account_status()
@@ -2482,6 +2510,10 @@ class BigQmtXtTrader:
         return result
 
     def subscribe(self, account):
+        declared = _account_type_name(getattr(account, "account_type", None))
+        if declared:
+            self._declared_account_type = declared
+            self._warn_on_account_type_mismatch()
         if not self.client.account_id:
             self.client.account_id = _account_id(account)
         # (Re)start the listener now that the account is known; the loop resubscribes
@@ -2507,6 +2539,35 @@ class BigQmtXtTrader:
         )
         self._event_thread.start()
 
+    def _note_server_account_type(self, pong):
+        """Remember what the deployment says it trades as."""
+        try:
+            reported = str((pong or {}).get("account_type") or "").strip().upper()
+        except Exception:
+            return
+        if reported:
+            self._server_account_type = reported
+            self._warn_on_account_type_mismatch()
+
+    def _warn_on_account_type_mismatch(self):
+        """Say so when the caller and the deployment disagree.
+
+        A client asking for CREDIT against a STOCK deployment gets an all-zero
+        asset row and no error at all -- that was issue #92, and it cost the
+        reporter a long time because nothing anywhere said the two disagreed.
+        """
+        server = self._server_account_type
+        declared = self._declared_account_type
+        if not server or not declared or server == declared:
+            return
+        log.warning(
+            "account_type mismatch: this client asked for %s but the QMT "
+            "deployment is configured as %s. The client's StockAccount type "
+            "does NOT travel to the server -- set BIGQMT_ACCOUNT_TYPE = %r in "
+            "the QMT-side local config and restart the strategy. Until then "
+            "queries answer as %s (a credit account read as STOCK returns an "
+            "all-zero asset row).", declared, server, declared, server)
+
     def _fire_account_status(self):
         """Fire on_account_status after connect/subscribe (MiniQMT parity).
 
@@ -2521,7 +2582,8 @@ class BigQmtXtTrader:
             callback.on_account_status(
                 CompatObject(
                     account_id=str(self.client.account_id or ""),
-                    account_type="STOCK",
+                    account_type=(self._server_account_type
+                                  or self._declared_account_type or "STOCK"),
                     status=1,  # ACCOUNT_STATUS_ONLINE (MiniQMT XtAccountStatus)
                 )
             )
