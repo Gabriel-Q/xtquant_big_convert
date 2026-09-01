@@ -1999,6 +1999,11 @@ class BigQmtXtData:
 
         ``download_timeout_seconds`` covers the server-side download only; it is
         generous because a cold code with a wide window can take minutes.
+
+        The server-side download is best-effort while the client pull can still
+        save it (cache enabled), but with the local cache disabled it is the
+        entire job -- its failure raises instead of reporting {finished: total},
+        which would be the fake progress of issue #47.
         """
         codes = [str(c) for c in (stock_list or []) if str(c or "").strip()]
         if not codes:
@@ -2021,6 +2026,7 @@ class BigQmtXtData:
         # Adjusted data additionally NEEDS this: QMT computes front/back-adjusted
         # bars from raw bars + dividend factors, and both must exist server-side
         # or the result is all zeros.
+        server_download_error = None
         try:
             self.client.call(
                 "download_history_data2",
@@ -2032,10 +2038,13 @@ class BigQmtXtData:
                 },
                 timeout_seconds=float(download_timeout_seconds),
             )
-        except Exception:
-            # Best-effort: some deployments lack the QMT global; the pull below
-            # may still work if the data already exists server-side.
-            pass
+        except Exception as exc:
+            # Best-effort only while the pull below can still save the
+            # download (data already on the server). With the local cache
+            # disabled there is no pull -- the server-side download is the
+            # whole job, and reporting {finished: total} after a failed one
+            # is the fake progress of issue #47.
+            server_download_error = exc
 
         if self._local_cache() is None:
             # local cache disabled: server-side download only (step 1). The
@@ -2043,6 +2052,8 @@ class BigQmtXtData:
             # the fake progress download of issue #47. The client pull is
             # skipped uniformly for every period (tick and bars alike) and
             # progress is reported per code without any pull.
+            if server_download_error is not None:
+                raise server_download_error
             total = len(codes)
             for index, code in enumerate(codes, 1):
                 if callback is not None:

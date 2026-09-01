@@ -598,6 +598,29 @@ class AdjustedDownloadTest(unittest.TestCase):
         self.assertEqual(result["finished"], 1)
         self.assertEqual(seen, [{"finished": 1, "total": 1, "stockcode": "600000.SH"}])
 
+    def test_download_with_cache_disabled_raises_on_server_download_failure(self):
+        """issue #47 follow-up: with the cache disabled the server-side download
+        is the whole job -- a failed one must not come back as {finished: total}
+        with per-code callbacks. That is the fake progress #47 fixed."""
+        xt = self._xt()
+        xt.client.local_cache_config["enabled"] = False
+        seen = []
+        original_call = xt.client.call
+
+        def failing_download(method, params=None, account_id=None, timeout_seconds=None):
+            if method == "download_history_data2":
+                raise RuntimeError("global not available")
+            return original_call(method, params, account_id=account_id, timeout_seconds=timeout_seconds)
+
+        xt.client.call = failing_download
+        with self.assertRaisesRegex(RuntimeError, "global not available"):
+            xt.download_history_data2(
+                ["600000.SH"], "tick", "20260828", "20260828", callback=seen.append
+            )
+
+        # No fake per-code progress was reported.
+        self.assertEqual(seen, [])
+
     def test_tick_download_with_cache_enabled_pulls_like_bars(self):
         """tick and bars share one contract: with the cache enabled the
         download also populates the client-side cache (step 2 runs)."""
