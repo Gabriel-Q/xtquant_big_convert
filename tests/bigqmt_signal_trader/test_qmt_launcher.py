@@ -227,5 +227,20 @@ class OpenQmtTest(unittest.TestCase):
             os.path.isdir = orig
 
 
+class LoginWindowDetectionTest(unittest.TestCase):
+    def test_login_detection_is_dpi_scale_independent(self):
+        # Same QMT login shell before/after 150% DPI scaling.
+        self.assertTrue(qmt_launcher._looks_like_login_window(
+            (544, 280, 1376, 871), 1920, 1200))
+        self.assertTrue(qmt_launcher._looks_like_login_window(
+            (816, 420, 2064, 1306), 2880, 1800))
+
+    def test_main_window_is_not_treated_as_login(self):
+        self.assertFalse(qmt_launcher._looks_like_login_window(
+            (0, 0, 1920, 1160), 1920, 1200))
+        self.assertFalse(qmt_launcher._looks_like_login_window(
+            (250, 120, 1650, 1020), 1920, 1200))
+
+
 if __name__ == "__main__":
     unittest.main()
