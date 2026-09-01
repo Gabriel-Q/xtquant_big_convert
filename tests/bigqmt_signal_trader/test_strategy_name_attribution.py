@@ -180,10 +180,101 @@ class IdentityMapTest(unittest.TestCase):
             self.assertEqual(found["bq:abc:sig-1"]["strategy_name"], "alpha")
 
 
+class IdentityClientWiringTest(unittest.TestCase):
+    """The identity store must not depend on which transport is configured.
+
+    Only a redis TRANSPORT builds the download-job clients. This deployment
+    runs zmq, so that attribute is None -- which silently meant orders were
+    never remembered at submit time either, and attribution could never work
+    no matter how the query side was written. Verified against the live
+    terminal: the RPC transport is zmq and redis is reachable and configured.
+    """
+
+    def _handlers(self, **attributes):
+        handlers = BigQmtRpcHandlers.__new__(BigQmtRpcHandlers)
+        for name, value in attributes.items():
+            setattr(handlers, name, value)
+        return handlers
+
+    def test_the_dedicated_client_is_used(self):
+        redis_client = FakeRedis()
+
+        handlers = self._handlers(order_identity_redis_client=redis_client,
+                                  download_job_redis_client=None)
+
+        self.assertIs(handlers._identity_redis(), redis_client)
+
+    def test_it_falls_back_to_the_download_job_client(self):
+        """Deployments that predate the dedicated attribute."""
+        redis_client = FakeRedis()
+
+        handlers = self._handlers(download_job_redis_client=redis_client)
+
+        self.assertIs(handlers._identity_redis(), redis_client)
+
+    def test_the_dedicated_one_wins(self):
+        dedicated, download = FakeRedis(), FakeRedis()
+
+        handlers = self._handlers(order_identity_redis_client=dedicated,
+                                  download_job_redis_client=download)
+
+        self.assertIs(handlers._identity_redis(), dedicated)
+
+    def test_neither_is_none_not_an_error(self):
+        handlers = self._handlers()
+
+        self.assertIsNone(handlers._identity_redis())
+
+    def test_the_strategy_builds_one_when_redis_is_configured(self):
+        import bigqmt_signal_trader_strategy as strategy
+
+        built = []
+
+        class Module(object):
+            @staticmethod
+            def build_redis_client(config):
+                built.append(config)
+                return "client"
+
+        real = strategy._load_bridge_module
+        try:
+            strategy._load_bridge_module = lambda name: Module
+            made = strategy._build_identity_redis_client(
+                {"redis": {"host": "127.0.0.1", "port": 6379}})
+        finally:
+            strategy._load_bridge_module = real
+
+        self.assertEqual(made, "client")
+        self.assertEqual(built, [{"host": "127.0.0.1", "port": 6379}])
+
+    def test_no_redis_config_means_no_client(self):
+        import bigqmt_signal_trader_strategy as strategy
+
+        self.assertIsNone(strategy._build_identity_redis_client({}))
+        self.assertIsNone(strategy._build_identity_redis_client({"redis": {}}))
+
+    def test_a_failure_to_build_does_not_take_init_down(self):
+        """Attribution is a nicety; a strategy that will not start is not."""
+        import bigqmt_signal_trader_strategy as strategy
+
+        def explode(name):
+            raise RuntimeError("no redis module")
+
+        real = strategy._load_bridge_module
+        try:
+            strategy._load_bridge_module = explode
+            made = strategy._build_identity_redis_client({"redis": {"host": "h"}})
+        finally:
+            strategy._load_bridge_module = real
+
+        self.assertIsNone(made)
+
+
 class AttributionTest(unittest.TestCase):
     def _handlers(self, redis_client):
         handlers = BigQmtRpcHandlers.__new__(BigQmtRpcHandlers)
-        handlers.download_job_redis_client = redis_client
+        handlers.order_identity_redis_client = redis_client
+        handlers.download_job_redis_client = None
         return handlers
 
     def setUp(self):

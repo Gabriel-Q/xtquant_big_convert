@@ -691,6 +691,21 @@ class BigQmtRpcHandlers:
         manager.keepalive(client_id, sub_id)
         return {}
 
+    def _identity_redis(self):
+        """Redis for the order-identity store, or None.
+
+        Deliberately its own attribute rather than reusing the download-job
+        client. Only a redis TRANSPORT builds that one, so on a zmq deployment
+        it is None -- which silently meant orders were never remembered at
+        submit time and so could never be attributed on query (issue #133).
+        The strategy wires this one from the redis config whatever the
+        transport, and falls back to the download-job client for deployments
+        that predate it. Everything here treats None as "no attribution",
+        never as an error: naming an order is a nicety, the order is not.
+        """
+        return (getattr(self, "order_identity_redis_client", None)
+                or getattr(self, "download_job_redis_client", None))
+
     def _download_job_redis(self):
         redis_client = getattr(self, "download_job_redis_client", None)
         if redis_client is None:
@@ -847,7 +862,7 @@ class BigQmtRpcHandlers:
                    if not str(getattr(row, "strategy_name", "") or "").strip()]
         if not unnamed:
             return rows
-        redis_client = getattr(self, "download_job_redis_client", None)
+        redis_client = self._identity_redis()
         if redis_client is None:
             return rows
         try:
@@ -1255,7 +1270,7 @@ class BigQmtRpcHandlers:
             from .exec_events import remember_order_identity
 
             remember_order_identity(
-                getattr(self, "download_job_redis_client", None),
+                self._identity_redis(),
                 request.account_id,
                 request.remark,
                 strategy_name=request.strategy_name,

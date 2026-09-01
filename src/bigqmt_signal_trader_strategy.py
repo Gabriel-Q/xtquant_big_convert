@@ -205,6 +205,27 @@ def reset_app():
     _reset_runner_app()
 
 
+def _build_identity_redis_client(config):
+    """A redis client for the order-identity store on a non-redis transport.
+
+    Lazily connecting: redis-py does not dial until the first command, so a
+    configured-but-unreachable redis cannot fail init here, and every caller
+    already treats an error as "no attribution".
+    """
+    redis_config = dict((config or {}).get("redis") or {})
+    if not redis_config:
+        return None
+    try:
+        if _load_bridge_module is not None:
+            module = _load_bridge_module("bigqmt_signal_trader.adapters.redis_common")
+        else:
+            from bigqmt_signal_trader.adapters import redis_common as module
+        return module.build_redis_client(redis_config)
+    except Exception as exc:
+        print("[bigqmt_rpc] order identity store unavailable: %s" % exc)
+        return None
+
+
 def _resolve_runtime_name(name):
     if name in _qmt_api:
         return _qmt_api[name]
@@ -464,6 +485,15 @@ def _build_rpc_service(context_info, app, config):
         quote_subscription_manager=quote_manager,
     )
     handlers.download_job_redis_client = response_redis_client or redis_client
+    # The order-identity store, which is how a query gets a strategy name back
+    # (QMT does not put one on its rows -- issue #133). It must not depend on
+    # the transport: only a redis transport builds the clients above, so a zmq
+    # deployment never remembered an order and could never attribute one.
+    # Built here from the redis config if there is one; absent config it stays
+    # None and attribution is simply skipped.
+    handlers.order_identity_redis_client = (
+        handlers.download_job_redis_client
+        or _build_identity_redis_client(config))
     handlers.download_job_chunk_size = int((config.get("download_jobs") or {}).get("chunk_size") or 10)
     handlers.download_job_ttl_seconds = int((config.get("download_jobs") or {}).get("job_ttl_seconds") or 3600)
     process_in_listener = _config_bool(rpc_config.get("process_in_listener"), True)
