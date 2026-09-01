@@ -603,11 +603,18 @@ class BigQmtRpcHandlers:
     )
 
     # probe 时抽查的 ContextInfo 方法。
+    # 板块写入那几个是为 issue #142 加的：读取（get_sector_list /
+    # get_stock_list_in_sector）确认可用，而写入走的是哪条通道一直没验过 ——
+    # 官方文档把 create_sector(parent_node, sector_name, overwrite) 记为 QMT
+    # 全局函数，本仓库却按 ContextInfo.create_sector(sectorname, stocklist) 调。
+    # 只探测存在性，不调用：create_sector 是写操作。
     _PROBE_CONTEXT_METHODS = (
         "get_full_tick", "get_market_data_ex", "get_market_data", "get_local_data",
         "subscribe_quote", "subscribe_whole_quote", "unsubscribe_quote",
         "get_trading_dates", "get_financial_data", "get_stock_list_in_sector",
         "do_back_test", "get_trade_detail_data",
+        "get_sector_list", "create_sector", "create_sector_folder",
+        "add_sector", "remove_sector", "remove_stock_from_sector", "reset_sector",
     )
 
     def _handle_probe_capabilities(self, params):
@@ -632,6 +639,21 @@ class BigQmtRpcHandlers:
         context_info = getattr(self.market_data, "context_info", None)
         for name in self._PROBE_CONTEXT_METHODS:
             info["contextinfo_methods"][name] = callable(getattr(context_info, name, None))
+        # 板块写入的全局函数通道（issue #142）。注意 False 的含义有限：QMT 把全局
+        # 只注入 *被挂载的那个文件* 的命名空间（PR #134 修的就是这件事），而这里
+        # 看到的是本模块的 globals + builtins + 策略捕获过的 qmt_api。所以
+        # True 说明确实拿得到，False 只说明「这条路径上没有」，不等于终端没有。
+        info["global_namespace"] = {}
+        for name in ("create_sector", "create_sector_folder", "add_sector",
+                     "remove_sector", "remove_stock_from_sector", "reset_sector"):
+            found = self.qmt_api.get(name)
+            if not callable(found):
+                try:
+                    import builtins
+                    found = globals().get(name) or getattr(builtins, name, None)
+                except Exception:
+                    found = None
+            info["global_namespace"][name] = callable(found)
         # 信用接口只读探测：不存在的全局直接标 unavailable；存在的真调一次，
         # 记录是否报错和返回行数（担保品/融券标的可能很多行，只计数）。
         for name in ("get_assure_contract", "get_enable_short_contract",
