@@ -2,31 +2,63 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
-## [Unreleased]
-
-### 修复
-
-- **qmt_launcher login 误输防护**（实盘事故修复）：账号框坐标原本打在右侧下拉箭头上（点它会展开账号列表），导致密码被追加进账号框；坐标改到输入框正中，且每步打完字都做字段级像素验证（账号必须进账号区、密码首字符必须进密码区、打密码期间账号区不许变），失败立即清空泄露并中止，绝不提交错误表单。
-- **zmq 出站堆积硬阻塞**：大 payload（全市场快照几 MB）与冷请求共享管道时，peer 水位满会让 send_multipart 阻塞 ~200ms、拖死 router 线程。内联发送改 DONTWAIT，堵了让位进有界队列逐拍重试（超 2000 丢最旧+记日志）。
-- **linkmini 模式误导**：它起的是迷你终端（无策略编辑器/ContextInfo），对本项目的桥不可用——README 与 docstring 已明确。
-
-## [Unreleased]
-
-### 修复
-
-- **subscribe_quote 盘中推送旧快照**（Issue #104）：订阅轮询默认走 FormulaServer 直连，其快照可能滞后数小时（实盘实测 11:30 后冻结、收盘后仍停在午间数据），导致"刚完成的 bar"被推成数小时前的旧值。订阅轮询改走 RPC 桥读 QMT 实时数据（`use_formula=False`，client.call / get_market_data_ex 新增该开关，默认行为不变）。实盘验证：最新 bar 为 15:00 收盘 bar 而非 11:30 旧快照。
-- **FormulaServer 快照滞后检测 + 自动回落**：intraday（tick/1m/5m/15m/30m/1h）直连回答的最新 bar 滞后超过 30 分钟（或跨日）时，本次调用**自动回落 RPC 桥拿实时数据**（不是只告警），并进入 120s 冷却期——冷却内 get_market_data_ex 直接跳过直连（不付双倍成本），到期自动重新探测（自愈）。告警同 code+period 每日一次。实盘验证：滞后检出 → 回落拿到 15:00 收盘 bar；冷却期跳过；到期恢复直连。
-- **probe_capabilities RPC**（此前已提交）：能力探测接口 + 部署快速开始文档 + 延迟报告 + launcher 锁屏防护。
-
-## [Unreleased]
+## [0.3.8] - 2026-09-01
 
 ### 新增
 
+- **`reload_deployment` / `reload_status`：同步代码后不必重启策略**。QMT 把模块留在 `sys.modules` 里，所以以前每次改动都要人工重启（修 #133 那天重启了七次）。现在 `xt_trader.reload_deployment()` 把所有 `bigqmt_signal_trader.*` 从 `sys.modules` 清掉、重新绑定策略模块 import 时持有的引用、再跑一次 `init()` 重建对象图，约 0.8 秒。
+
+  用 purge 而不是 `importlib.reload`：reload 必须按依赖顺序（`order_bigqmt` 在 import 时 `from ..models import OrderSnapshot`，顺序错了会静默留住旧类），purge 没有顺序问题。
+
+  **只是「已排期」**：执行它要 `reset_app()`，那会停掉正在应答这个请求的 RPC 服务，所以回复必须先出去；真正的重载在下一个 adjust tick 上做，轮询 `reload_status()` 看结果（`ok` / `modules_purged` / 前后版本号）。
+
+  **刷新不了 `bigqmt_signal_trader_strategy.py` 和 `BIGQMT_REDIS_DRYRUN.py`** —— QMT 自己 exec 这两个文件，模块没法 reload 自己所在的模块。改这两个仍要重启。
+
+  实盘验证不是「跑完没报错」：把部署目录里的 `version.py` 改成探针值，reload 后 `ping` 跟着变，还原文件再 reload 又变回来。两次 reload、零重启。
+
+- **`describe_trade_detail_fields` 诊断 RPC**：返回 QMT 自己的 ORDER / DEAL 行上**有哪些属性名**（只有名字，不返回值——行里有价格、数量、柜台编号，而这条走公共通道）。#113、#130、#133 全是「某字段缺失」，而分辨「是终端没给还是桥没转发」以前每次都要一轮部署+重启。
+
 - **能力探测 RPC `probe_capabilities`**：只读探查当前部署暴露了哪些 QMT callable——运行时全局函数绑定（passorder/download/信用等 20 项）、ContextInfo 方法存在性、信用接口只读试调（行数/报错）。部署后跑一次即可确认这台券商 QMT 的能力边界。参考 cfquant 的 credit probe 思路。
+
 - **docs/DEPLOY_QUICKSTART.md**：单账号部署最短路径（5 步 + 部署期常见问题表），README 快速开始入口挂载。
+
 - **docs/LATENCY_REPORT.md**：延迟报告独立成文（传输层对比、FormulaServer 直连、下单链路各环节、方法论声明）。
 
 ### 修复
+
+- **`query_stock_orders` / `query_stock_trades` 字段缺失**（Issue #133，@sumo225270）：委托缺 `account_type` / `instrument_name`，成交缺 `account_type`，两边 `strategy_name` 恒为空。三个字段三个不同原因：
+
+  - `account_type` 桥根本没发过（持仓发了，但**硬编码成 2**，信用账户上就是错的——和 #92 同一类静默）。现在取部署实际配置的类型。
+  - `instrument_name` 从没从行上读过。已按持仓行同样的方式读 `m_strInstrumentName`，另加 `ContextInfo.get_stock_name` 兜底（按代码缓存）。
+  - `strategy_name` **QMT 根本不在行上给** —— 实盘列出全部属性：ORDER 120 个、DEAL 47 个，**都没有 `m_strStrategyName`**。它按策略过滤却从不回报。经本桥下的委托改从自己的身份库回填（下单时就记了，键是作为委托备注发出去的 `user_order_id`）；手工单没有备注，保持为空——编一个比空字符串更糟。
+
+  顺带补齐 `xttype.XtOrder` / `XtTrade` 契约里其余漏掉的：`secu_account`、`offset_flag`、`direction`，成交多一个 `commission`。实盘发现 DEAL 行**同时**有 `m_dComssion`（QMT 自己拼错的）和 `m_dCommission`，「第一个存在的属性」可能停在 0.0，改成取第一个非零。
+
+- **大 QMT 加载的是它自带的 `xtquant`，不是本仓库的 shim**（线上事故）：终端自带 `bin.x64/Lib/site-packages/xtquant/`，沙箱里 `from xtquant import xtconstant` 命中的是那一份——**91 个名字，本仓库 shim 有 538 个**。没有一个值不同，447 个纯粹是没有，`ACCOUNT_TYPE_DICT` 就在其中。在 import 时读它，本地测试全绿，实盘重启后 `build_app` 抛 `AttributeError`，`init` 直接死，**所有委托/持仓查询都答 `order_gateway is not configured`**，而 ping 正常、adjust 照跑，从外面看桥是活的。现在只用两份都有的常量，并把终端实际的 91 个名字快照进测试钉住。
+
+- **`download_sector_data` 等 6 个方法缺客户端包装**（Issue #130，@happyybb / PR #132）：服务端适配器和 RPC 白名单一直都有，缺的只是 `BigQmtXtData` 上那层包装，于是直接撞 `AttributeError`。补上 `download_sector_data` / `download_cb_data` / `download_index_weight` / `download_history_contracts` / `get_stock_type` / `subscribe_l2thousand`，并加不变式测试：白名单里每个方法要么有包装、要么明确声明为 `call_method` 专用。
+
+  **注意**：前五个在大 QMT 上仍会报错（没有可连的原生 xtdata 行情服务），改的是把看不出原因的 `AttributeError` 换成说明原因的错误。**板块数据不用下载**，`get_sector_list()` / `get_stock_list_in_sector()` 直接可读（实测 13 个板块、沪深A股 5217 只）。
+
+  `get_stock_type` 单独处理：它不报错，但对**任何**代码都返回 `0`（实测股票/ETF/债券/期权全一样）。恒为 0 的「类型」比报错更糟——报错看得见，错的分类看不见。改成显式抛错并指向真正能用的 `get_instrument_type()`。
+
+- **入口当普通脚本运行时毫无提示**（Issue #123，@lzxN）：日志看着像正常启动然后「结束运行」，唯一的线索是 `download globals bound=[]` 是空的、且没有 `init ok`。那说明 QMT **没注入任何 API 全局**，文件是被当普通脚本执行的，`init()` 永远不会被调用，RPC 服务不启动，外部连不上是因为根本没东西在监听。现在会直说，并点名两个已知原因：在策略编辑器界面运行、勾了「独立 python 进程」。
+
+- **`on_account_status` 恒报 STOCK**（Issue #103，@fengzhizialex）：信用账户上也答 `stock 1`。改为报服务端实际配置的类型；客户端声明与服务端不一致时告警（客户端的 `StockAccount(id, "CREDIT")` **不会**传到 QMT 侧，静默不一致正是 #92 难查的原因）。
+
+- **委托身份库与下载任务只在 redis 传输下可用**：两者都读 `download_job_redis_client`，而**只有 redis 传输才会建这个 client**，zmq 部署上是 `None`。后果是下单时从没记过委托身份（于是 #133 的策略名永远回填不了），以及 `submit_download_history_data` 恒报 `download jobs require a Redis client`——而干活的 `_pump_download_jobs` 每个 adjust tick 都在跑。现在两者都从 redis 配置取 client，与传输无关。
+
+  同时**下载任务在 worker 关闭时改为拒绝提交**（大 QMT 上默认关闭，因为内嵌 xtdata SDK 没有可连的数据服务）——否则任务进了没人消费的队列，看起来成功、永远不完成。拒绝信息里说明开关名和替代做法。
+
+- **qmt_launcher login 误输防护**（实盘事故修复）：账号框坐标原本打在右侧下拉箭头上（点它会展开账号列表），导致密码被追加进账号框；坐标改到输入框正中，且每步打完字都做字段级像素验证（账号必须进账号区、密码首字符必须进密码区、打密码期间账号区不许变），失败立即清空泄露并中止，绝不提交错误表单。
+
+- **zmq 出站堆积硬阻塞**：大 payload（全市场快照几 MB）与冷请求共享管道时，peer 水位满会让 send_multipart 阻塞 ~200ms、拖死 router 线程。内联发送改 DONTWAIT，堵了让位进有界队列逐拍重试（超 2000 丢最旧+记日志）。
+
+- **linkmini 模式误导**：它起的是迷你终端（无策略编辑器/ContextInfo），对本项目的桥不可用——README 与 docstring 已明确。
+
+- **subscribe_quote 盘中推送旧快照**（Issue #104）：订阅轮询默认走 FormulaServer 直连，其快照可能滞后数小时（实盘实测 11:30 后冻结、收盘后仍停在午间数据），导致"刚完成的 bar"被推成数小时前的旧值。订阅轮询改走 RPC 桥读 QMT 实时数据（`use_formula=False`，client.call / get_market_data_ex 新增该开关，默认行为不变）。实盘验证：最新 bar 为 15:00 收盘 bar 而非 11:30 旧快照。
+
+- **FormulaServer 快照滞后检测 + 自动回落**：intraday（tick/1m/5m/15m/30m/1h）直连回答的最新 bar 滞后超过 30 分钟（或跨日）时，本次调用**自动回落 RPC 桥拿实时数据**（不是只告警），并进入 120s 冷却期——冷却内 get_market_data_ex 直接跳过直连（不付双倍成本），到期自动重新探测（自愈）。告警同 code+period 每日一次。实盘验证：滞后检出 → 回落拿到 15:00 收盘 bar；冷却期跳过；到期恢复直连。
 
 - **qmt_launcher 锁屏防护**：`restart_qmt` 在会话锁屏且需要自动登录时直接拒绝执行（否则关掉终端却登不回去，交易中断）；新增 `session_is_locked()` 检测。
 
