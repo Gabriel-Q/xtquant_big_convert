@@ -13,6 +13,15 @@
 ### 修复
 
 - **`query_account_status` 实盘恒空列表**（issue #272）：占位实现用了 `TASK` detail type——那是**委托任务状态**，没在跑的委托任务时恒空，和账号状态是两回事。大 QMT 没有原生账号状态结构，最近真源是 ACCOUNT 行的 `m_Enable`：可用 → `ACCOUNT_STATUS_OK(0)`，禁用 → `ACCOUNT_STATUS_FAIL(3)`，无 ACCOUNT 行 → 空列表。MiniQMT 更丰富的状态（WAITING_LOGIN 等）在大 QMT 接口面观察不到，不编造。实盘验证：`[{'account_id': '...', 'status': 0}]`。
+
+- **SDK 与 ContextInfo 两条路都失败时，错误只报后者**（issue #277，@OdinCN）：`download_financial_data` 在 miniQMT 停掉时，用户看到的是 `NotImplementedError: ContextInfo.download_financial_data is not available`——真正的原因（SDK 报「无法连接行情服务」）被吞了。现在双路皆败时错误同时带两边：SDK 的原始原因 + ContextInfo 的。
+
+- **`get_market_data` 宽表的时间列类型对齐 miniQMT**：0.3.34 把纯数字时间列转成了 int，而 miniQMT 的 time_list 实测是 **str**（`data['open'].columns` dtype='str'——两边打印出来都不带引号，只有 dtype 能区分）。改为全部转 str，与 miniQMT 完全一致。
+
+### 文档
+
+- **README：批量下载用 `download_history_data2` 整批传**（issue #275，@pujfei）：循环单票各付一次最坏 60s 的可见性等待，整批共用一次（10 票实测 2.2s）。阻塞是刻意的（下载语义=落库后可见）。
+- **README：`get_financial_data` 两个前提**（本地有数据 + 日期必给）。
 ## [0.3.34] - 2026-09-10
 
 ### 修复

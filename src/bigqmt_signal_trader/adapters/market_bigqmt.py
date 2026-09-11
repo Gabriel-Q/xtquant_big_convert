@@ -670,6 +670,7 @@ class BigQmtMarketDataProvider:
         get_trading_dates cost 2.1s per call forever (issue #160).
         """
         module = self._native()
+        native_error = None
         if module is not None and not self._native_known_dead(func_name):
             fn = getattr(module, func_name, None)
             if fn is not None:
@@ -677,12 +678,24 @@ class BigQmtMarketDataProvider:
                     result = fn(*args, **kwargs)
                     self._native_dead_marks().pop(func_name, None)
                     return result
-                except Exception:
+                except Exception as exc:
                     # Big QMT path: SDK present but no quote service to talk
                     # to ("无法连接行情服务"). Don't crash — let the ContextInfo
                     # fallback have a turn.
+                    native_error = exc
                     self._native_dead_marks()[func_name] = time.time()
-        return context_caller()
+        try:
+            return context_caller()
+        except Exception as context_error:
+            if native_error is not None:
+                # Both paths failed: the SDK's own reason (e.g. "无法连接行情服务"
+                # when miniQMT is down) is the actionable one, and it must not be
+                # buried under ContextInfo's bare NotImplementedError (#277).
+                raise RuntimeError(
+                    "%s failed on both paths: SDK %s: %s | ContextInfo %s: %s"
+                    % (func_name, native_error.__class__.__name__, native_error,
+                       context_error.__class__.__name__, context_error))
+            raise
 
     def _call_first_supported_named(self, shapes):
         """``(method_name, args, kwargs, result)`` for the shape that bound.
