@@ -635,6 +635,11 @@ pymongo 的 `bson`，两者输出实测逐字节一致），客户端不需要�
 
 大 QMT 基本每天早上要重启一次，卡点在登录框。两条路绕过它：
 
+> **也可以干脆不重启**（issue #276，@pujfei）：QMT 设置里的「启用自动初始化」
+> 取消勾选后，终端不再每天自动重启策略，可长期不重启运行，功能不受影响。
+> 不重启的部署仍然要注意：升级桥代码后必须手动重启策略（QMT 跨运行保留
+> `sys.modules`，光拷文件不生效）。下面是程序化启停的方案。
+
 > **依赖**：进程枚举优先用 `psutil`；Win11 起系统不再带 `wmic`，没有 psutil 时
 > `close_qmt`/`status` 会直接报 `cannot enumerate processes`（issue #128）。
 > 装上即可：`pip install psutil`。
