@@ -404,6 +404,11 @@ field_list=[open,high,low,close,volume,amount]
 
 **重启策略后，第一次调用 `get_financial_data` 可能要几分钟。** 实测过一次 **346 秒**——当时 QMT 自身完全健康（全推行情每几秒一批、线程池正常），主策略线程也空闲（adjust 每 10 秒 100 拍，每拍 < 2ms）。当天之后的所有调用都在 1 秒内，**包括从没查过的票和没查过的表**，所以这是一次性代价，不是按代码的缓存未命中。
 
+**两个前提条件**（2026-09-10 实测确认，不达成就返回 None 而不是报错）：
+
+1. **数据必须在终端本地**：`get_financial_data` 读的是大 QMT 终端的本地财务库，从没下载过的票/表返回空。大 QMT 没有 `ContextInfo.download_financial_data`，xtdata SDK 又连不上它的数据服务，所以**桥上的 `download_financial_data` 在大 QMT 用不了**——下载只能在 QMT 界面里做（数据管理/财务数据），或在 miniQMT 数据服务上做。
+2. **日期区间要给**：`start_time`/`end_time` 留空时 ContextInfo 直接返回 None（实测 0.17s 空手而归）。给真实区间才返回数据行。MiniQMT 传过来的老代码如果习惯空调用，在大 QMT 上要补上日期。
+
 问题在于它的传染性：**RPC 处理是串行的**，一个调用卡住，后面排队的全部超时。客户端看到的是一片超时，和「桥死了」完全一样。
 
 #### 启动时自动预热（默认开启）

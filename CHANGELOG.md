@@ -3,6 +3,15 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
 
+## [未发布]
+
+### 修复
+
+- **`get_market_data` 超过 500 只票经常 RPC 超时**（用户实测反馈，2026-09-10，issue #278）：它一直走 QMT 主线程 RPC，而 `get_market_data_ex` 早就走 FormulaServer 直连。现在 `get_market_data` 也挂进同一条 `getMarketData` 直连（复用同一参数翻译/结果适配），盘中形成 bar 的滞后检查与冷却自愈和 md_ex 对齐；复权（front/back）读取仍回落 RPC（FormulaServer 不出复权价）。实盘实测（国金，600 只 × 5 字段 × 10 天）：RPC 桥 **>30s 超时** → 直连 **718ms**；客户端方法全程（含文档形状转换）500 只 **252ms**。注意：0.3.32  changelog 记录的「get_market_data 文档形状」修复当时 tag 里并没有代码（拓扑错位），本版才真正随包发出。
+
+### 文档
+
+- **README 写明 `get_financial_data` 的两个前提**（用户问）：数据必须在终端本地（大 QMT 没有可用的下载通道，只能在 QMT 界面数据管理里下载）；`start_time`/`end_time` 留空直接返回 None——日期区间必须给。
 ## [0.3.33] - 2026-09-10
 
 对齐 MiniQMT 契约：账户查询从 dict 改成可属性访问的行对象（现场报错 `'dict' object has no attribute 'm_nStatus'`），另按终端自带的 `xttype` 逐个对账，补齐七处回调与返回对象缺的字段（#271）。

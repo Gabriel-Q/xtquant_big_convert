@@ -618,7 +618,10 @@ def _to_documented_market_data_shape(data, field_list, stock_list, period):
         columns = list(_cols) if _cols is not None else []
         if not columns:
             continue
-        time_col = "time" if "time" in columns else ("index" if "index" in columns else None)
+        # RPC path long frames carry 'index'; FormulaServer-built frames carry
+        # 'stime'. Both are the time axis.
+        time_col = next(
+            (c for c in ("time", "index", "stime") if c in columns), None)
         if time_col is None:
             return data  # not a long bar frame -- pass through untouched
         wanted = fields or [c for c in columns if c != time_col]
@@ -1188,7 +1191,7 @@ class BigQmtRpcClient:
         # 其他方法是静态参考数据，不受时间序列滞后影响，照常走快速路径。
         skip_formula = (
             router is not None
-            and method == "get_market_data_ex"
+            and method in ("get_market_data_ex", "get_market_data")
             and _formula_stale_active()
         )
         if router is not None and router.supports(method) and not skip_formula:
@@ -1196,7 +1199,7 @@ class BigQmtRpcClient:
 
             try:
                 result = _restore_jsonable(router.call(method, params or {}))
-                if method == "get_market_data_ex":
+                if method in ("get_market_data_ex", "get_market_data"):
                     # 直连快照可能滞后（实测冻结数小时）——滞后即告警、
                     # 本次调用自动回落 RPC 桥拿实时数据，并进入冷却期
                     # 让后续调用直接跳过直连（到期重新探测，自愈）。
