@@ -3,6 +3,11 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
 
+## [未发布]
+
+### 修复
+
+- **`get_market_data` 宽表的时间列类型对齐 miniQMT**：0.3.34 把纯数字时间列转成了 int，而 miniQMT 的 time_list 实测是 **str**（`data['open'].columns` dtype='str'——两边打印出来都不带引号，只有 dtype 能区分）。改为全部转 str，与 miniQMT 完全一致。
 ## [0.3.34] - 2026-09-10
 
 ### 修复

@@ -46,9 +46,9 @@ class PivotTest(unittest.TestCase):
         self.assertEqual(set(out.keys()), {"open", "close"})
         frame = out["close"]
         self.assertEqual(list(frame.index), STOCKS)
-        self.assertEqual(list(frame.columns), [20260901, 20260902])
-        self.assertEqual(frame.loc["601398.SH", 20260902], 8.21)
-        self.assertEqual(frame.loc["510880.SH", 20260901], 5.06)
+        self.assertEqual(list(frame.columns), ['20260901', '20260902'])
+        self.assertEqual(frame.loc["601398.SH", "20260902"], 8.21)
+        self.assertEqual(frame.loc["510880.SH", "20260901"], 5.06)
 
     def test_single_stock_bare_frame_pivots(self):
         out = _to_documented_market_data_shape(
@@ -56,7 +56,7 @@ class PivotTest(unittest.TestCase):
 
         self.assertEqual(set(out.keys()), {"open", "close"})
         self.assertEqual(list(out["close"].index), ["510880.SH"])
-        self.assertEqual(out["open"].loc["510880.SH", 20260901], 5.05)
+        self.assertEqual(out["open"].loc["510880.SH", "20260901"], 5.05)
 
     def test_already_documented_shape_passes_through(self):
         documented = {"close": pd.DataFrame(
@@ -85,12 +85,14 @@ class PivotTest(unittest.TestCase):
         out = _to_documented_market_data_shape({"510880.SH": frame}, [], STOCKS, "1d")
         self.assertIsInstance(out, dict) and out["510880.SH"] is frame
 
-    def test_digit_string_time_labels_become_ints(self):
+    def test_columns_match_miniqmt_str_dtype(self):
+        # miniQMT 实测 data['open'].columns dtype='str'（不是 int）——
+        # 打印出来都不带引号所以容易误读，以 dtype 为准。
         frames = {"510880.SH": pd.DataFrame(
-            [["20260901", 5.05, 5.06]], columns=["index", "open", "close"])}
+            [[20260901, 5.05, 5.06]], columns=["index", "open", "close"])}
         out = _to_documented_market_data_shape(frames, ["open", "close"], ["510880.SH"], "1d")
-        self.assertEqual(list(out["close"].columns), [20260901])
-        self.assertEqual(out["close"].loc["510880.SH", 20260901], 5.06)
+        self.assertEqual(list(out["close"].columns), ["20260901"])
+        self.assertEqual(out["close"].loc["510880.SH", "20260901"], 5.06)
 
 
 class ClientEndToEndTest(unittest.TestCase):
@@ -104,7 +106,7 @@ class ClientEndToEndTest(unittest.TestCase):
 
         self.assertEqual(set(out.keys()), {"open", "close"})
         self.assertEqual(list(out["close"].index), STOCKS)
-        self.assertEqual(out["close"].loc["510880.SH", 20260901], 5.06)
+        self.assertEqual(out["close"].loc["510880.SH", "20260901"], 5.06)
 
 
 if __name__ == "__main__":

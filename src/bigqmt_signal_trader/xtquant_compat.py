@@ -632,12 +632,12 @@ def _to_documented_market_data_shape(data, field_list, stock_list, period):
     if not wide:
         return data
     out = {field: pd.DataFrame(series).T for field, series in wide.items()}
-    # MiniQMT's time_list is ints (20260901); the long frame's labels can
-    # arrive as digit strings through JSON. Match the documented type so
-    # frame[20260901] works for callers.
+    # MiniQMT's time_list is STRINGS ('20260901', dtype='str' -- verified by
+    # printing data['open'].columns on a live miniQMT, not by the bare
+    # printout, which shows no quotes either way). Normalize every label to
+    # str so the frame matches miniQMT's dtype.
     for frame in out.values():
-        if len(frame.columns) and all(str(c).isdigit() for c in frame.columns):
-            frame.columns = [int(c) for c in frame.columns]
+        frame.columns = [str(c) for c in frame.columns]
     return out
 
 

@@ -97,7 +97,7 @@ class ClientEndToEndTest(unittest.TestCase):
 
         self.assertEqual(set(out.keys()), {"close", "open"})
         self.assertEqual(list(out["close"].index), ["510880.SH"])
-        self.assertEqual(out["close"].loc["510880.SH", 20260901], 5.06)
+        self.assertEqual(out["close"].loc["510880.SH", "20260901"], 5.06)
         self.assertEqual(transport.calls, 0, "the transport must not be touched")
 
     def test_stale_answer_fails_over_like_md_ex(self):
