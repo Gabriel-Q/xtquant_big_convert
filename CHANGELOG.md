@@ -3,11 +3,36 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
 
-## [Unreleased]
+## [未发布]
 
 ### 修复
 
 - **合成周期回落在国金 2.0.8.0 上自动触发进不去**（issue #237）：`get_market_data_ex_ori` 对 1mon+ 的空答案不是 `[]`，而是 12 个字段、每个都是长度为 0 的列字典（`{time:[], stime:[], open:[], ... settelementPrice:[], ...}`）。`_market_data_answer_empty` 用 `if records:` 判断，这个 dict 为真，主路径被当成「有数」直接返回，`_synth_period_rescue` 根本不跑。同一台终端上 `synth_fallback_only=True` 能救出 10 行（`ContextInfo.get_market_data`），公式口六列也是 10 行。现在列字典看任一列的长度，全 0 才是空。单测假终端原先写 `{code: []}`，覆盖不到这个形状。
+
+- **`get_sector_list` 兜底清单里两个板块名拼错，喂给 `get_stock_list_in_sector` 返回空**。
+  把 13 个名字在国金大 QMT 2.1.19.0 上逐个实测（2026-09-11，只读）：`沪市A股` /
+  `深市A股` 返回 0 行，这台终端的拼法是 `上证A股` / `深证A股`（2318 / 2902 只，
+  合计正好等于 `沪深A股` 的 5220）。基金反过来，`沪市基金` / `深市基金` 有数据而
+  `上证基金` / `深证基金` 为 0，所以拼法没有规律，只能测。清单已改正；`中金所`
+  在股票账户上返回 0，判断是权限而非拼写，保留。
+
+  这正是 #143 担心的事：一份看起来像真的清单里混着答不出东西的名字。新增测试
+  钉住改正后的两个名字、钉住错拼法不会回流、钉住基金拼法不被「顺手修坏」。
+
+- **委托回报推送上 `price_type` 恒为 None**。查询路径 `query_orders` 一直读原生
+  `m_nOrderPriceType`，推送路径 `normalize_order_event` 发了 19 个字段却从没读过
+  这一个，走 `on_stock_order` 回调的调用方拿到的 `XtOrder.price_type` 永远是
+  None——现场是同一笔委托，提交日志写着 MARKET，每条回报推送都是 None。
+  `xttype.XtOrder` 契约里有这个字段，所以这和 #271 补的七处、#173 补的
+  `trade_amount` 是同一类缺口：查询和推送两条路径要给出同一组字段。现在推送也读
+  `m_nOrderPriceType`，两边对齐。
+
+### 文档
+
+- README「板块」一节加了 13 个名字的实测对照表，附返回条数；`get_stock_list_in_sector`
+  拼错名字不报错、只给空列表，看到空结果先核对名字。RPC 参考 3.3 节同步改正名字，
+  并把「fallback 返回一组常用板块名」这句改成现在的实际行为：默认抛错，`allow_fallback=True`
+  才给清单。
 
 ---
 
